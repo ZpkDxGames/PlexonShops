@@ -1,0 +1,132 @@
+# PlexonShops 1.0.0
+# Runtime database work is always executed away from the server thread.
+
+database:
+  file: "shops.db"
+  maximum-pool-size: 2
+  connection-timeout-millis: 5000
+
+worker:
+  threads: 2
+  queue-capacity: 2048
+  shutdown-timeout-seconds: 10
+
+limits:
+  max-shops-per-player: 1
+  # Permission overrides use plexonshops.limit.<number>. The plugin scans up to this value.
+  maximum-permission-limit: 100
+  max-categories-per-shop: 3
+  max-labeled-items-per-shop: 45
+  shop-name-length: 40
+  description-lines: 5
+  description-line-length: 80
+  label-length: 48
+
+defaults:
+  status: CLOSED
+  category: MISC
+  teleport-fee: 25.0
+  description:
+    - "<gray>A new player shop in the <gradient:#8CE6FF:#5BA8FF>Plexon</gradient> directory.</gray>"
+
+teleport:
+  enabled: true
+  warmup-seconds: 3
+  cancel-on-movement: true
+  economy-enabled: true
+  fail-open-without-vault: false
+  owners-can-set-fee: true
+  maximum-owner-fee: 5000.0
+
+inactivity-purge-days: 45
+blacklisted-worlds:
+  - "world_nether"
+  - "world_the_end"
+
+chat-prompts:
+  cancel-word: "cancel"
+  timeout-seconds: 60
+
+guis:
+  directory:
+    size: 54
+    content-slots: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
+    slots:
+      filter-all: 0
+      filter-blocks: 1
+      filter-tools: 2
+      filter-combat: 3
+      filter-redstone: 4
+      filter-farming: 5
+      filter-misc: 6
+      filter-labeled: 7
+      close: 8
+      previous: 45
+      page: 49
+      manage: 50
+      next: 53
+  owner-selector:
+    size: 54
+    content-slots: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
+    slots:
+      previous: 45
+      back: 48
+      create: 49
+      next: 53
+  create:
+    size: 27
+    slots:
+      confirm: 11
+      cancel: 15
+  manage:
+    size: 54
+    slots:
+      status: 10
+      categories: 12
+      icon: 14
+      location: 16
+      rename: 28
+      description: 30
+      labels: 32
+      teleport-fee: 34
+      delete: 45
+      back: 49
+  categories:
+    size: 27
+    slots:
+      blocks: 10
+      tools: 11
+      combat: 12
+      redstone: 14
+      farming: 15
+      misc: 16
+      back: 22
+  icon:
+    size: 27
+    slots:
+      reset: 11
+      preview: 13
+      save: 15
+      back: 22
+  labels:
+    size: 54
+    content-slots: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
+    slots:
+      previous: 45
+      back: 48
+      add: 49
+      next: 53
+  rating:
+    size: 27
+    slots:
+      star-1: 10
+      star-2: 11
+      star-3: 12
+      star-4: 13
+      star-5: 14
+      back: 22
+  delete-confirm:
+    size: 27
+    slots:
+      confirm: 11
+      cancel: 15

@@ -1,0 +1,43 @@
+name: PlexonShops
+version: '${version}'
+main: com.plexon.shops.PlexonShops
+description: GUI-first player shop directory for the Plexon ecosystem.
+api-version: '1.21'
+load: POSTWORLD
+author: ZpkDxGames
+website: https://github.com/ZpkDxGames/PlexonShops
+softdepend:
+  - Vault
+  - PlaceholderAPI
+
+commands:
+  pshops:
+    description: Browse and manage Plexon player shops.
+    usage: /<command> [manage|reload]
+    aliases: [pshop, playershops]
+
+permissions:
+  plexonshops.use:
+    description: Opens and uses the global player shops directory.
+    default: true
+  plexonshops.create:
+    description: Creates and manages personal shops.
+    default: true
+  plexonshops.admin:
+    description: Grants every PlexonShops administrative capability.
+    default: op
+    children:
+      plexonshops.use: true
+      plexonshops.create: true
+      plexonshops.reload: true
+      plexonshops.format: true
+      plexonshops.limit.unlimited: true
+  plexonshops.reload:
+    description: Reloads PlexonShops configuration and language files.
+    default: op
+  plexonshops.format:
+    description: Allows MiniMessage formatting in owned shop text.
+    default: op
+  plexonshops.limit.unlimited:
+    description: Bypasses the per-player shop limit.
+    default: false

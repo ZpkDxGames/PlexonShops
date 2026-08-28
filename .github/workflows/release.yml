@@ -1,0 +1,67 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Verify and package
+        run: ./gradlew --no-daemon clean test javadoc shadowJar
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
+          EXPECTED_TAG="v${VERSION}"
+          JAR="build/libs/PlexonShops-${VERSION}.jar"
+          CHECKSUM="build/release/SHA256SUMS.txt"
+
+          if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then
+            echo "Release tag $RELEASE_TAG does not match project version $VERSION"
+            exit 1
+          fi
+
+          mkdir -p build/release
+          sha256sum "$JAR" > "$CHECKSUM"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$JAR" "$CHECKSUM" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$JAR" "$CHECKSUM" \
+              --target "$GITHUB_SHA" \
+              --title "PlexonShops ${VERSION}" \
+              --generate-notes
+          fi
