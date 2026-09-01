@@ -110,8 +110,11 @@ val verifyDistribution = tasks.register("verifyDistribution") {
     group = "verification"
     description = "Checks that the installable JAR contains plugin metadata and embedded runtime drivers."
     dependsOn(shadowJar)
+    inputs.file(shadowJar.flatMap { it.archiveFile })
+        .withPropertyName("distributionJar")
+        .withPathSensitivity(PathSensitivity.NONE)
     doLast {
-        val archive = shadowJar.get().archiveFile.get().asFile
+        val archive = inputs.files.singleFile
         require(archive.isFile && archive.length() > 1_000_000L) {
             "Installable JAR is missing or unexpectedly small: $archive"
         }
