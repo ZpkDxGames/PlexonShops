@@ -13,11 +13,13 @@ inventory GUIs; chat is used only for free-form text entered from a GUI action.
 
 - Paginated global directory with All, Blocks, Tools, Combat, Redstone, Farming,
   Miscellaneous, and Labeled Items filters
-- Player-head or custom-item shop icons with MiniMessage names and descriptions
+- Player-head or custom-item shop icons with safe MiniMessage names and descriptions
 - OPEN, CLOSED, and MAINTENANCE states
-- Multiple shops per player through numbered permission overrides
+- Primary shops and rank-controlled sub-shops through numbered permission overrides
 - One-to-five-star ratings, total visits, and unique visitors
-- Cancellable teleport warmups using Paper's asynchronous teleport API
+- Cancellable bossbar teleport warmups using Paper's asynchronous teleport API
+- Configurable teleport cooldowns, damage/movement cancellation, sounds, particles,
+  owner bypasses, and arrival actionbars
 - Optional Vault economy charges with refund-on-failure behavior
 - Optional internal PlaceholderAPI expansion
 - Asynchronous SQLite persistence, WAL mode, prepared statements, transactions,
@@ -28,8 +30,8 @@ inventory GUIs; chat is used only for free-form text entered from a GUI action.
 
 | Component | Version |
 | --- | --- |
-| Paper | 1.21.10 (1.21.x API line) |
-| Java | 21 |
+| Paper | 26.2 stable |
+| Java | 25 or newer |
 | Vault + an economy plugin | Optional; required when paid teleports are enabled |
 | PlaceholderAPI | Optional |
 
@@ -39,7 +41,8 @@ inventory GUIs; chat is used only for free-form text entered from a GUI action.
 2. Place it in the Paper server's `plugins/` directory.
 3. Install Vault and a compatible economy provider if teleport fees are enabled.
 4. Start the server and review `plugins/PlexonShops/config.yml`.
-5. Use `/pshops manage` to create a shop. New shops begin CLOSED by default.
+5. Grant `plexonshops.create` directly or through PlexonRanks, then use
+   `/pshops manage`. New shops begin CLOSED by default.
 
 ## Commands
 
@@ -56,12 +59,16 @@ Aliases: `/pshop`, `/playershops`.
 | Permission | Default | Purpose |
 | --- | --- | --- |
 | `plexonshops.use` | Everyone | Browse, teleport, and rate |
-| `plexonshops.create` | Everyone | Create and manage owned shops |
+| `plexonshops.create` | Nobody | Create a primary shop and manage owned shops |
 | `plexonshops.admin` | Operators | All administrative capabilities |
 | `plexonshops.reload` | Operators | Reload runtime configuration and messages |
 | `plexonshops.format` | Operators | Use MiniMessage in owned shop text |
-| `plexonshops.limit.<number>` | Nobody | Set a higher per-player shop limit |
-| `plexonshops.limit.unlimited` | Nobody | Bypass the shop limit |
+| `plexonshops.subshops.<number>` | Nobody | Grant that many additional sub-shops |
+| `plexonshops.subshops.unlimited` | Nobody | Bypass the sub-shop limit |
+| `plexonshops.limit.<number>` | Nobody | Legacy total-shop limit; retained for compatibility |
+| `plexonshops.limit.unlimited` | Nobody | Legacy unlimited total-shop limit |
+| `plexonshops.teleport.cooldown.bypass` | Operators | Bypass teleport cooldowns |
+| `plexonshops.teleport.fee.bypass` | Nobody | Bypass all teleport fees |
 
 ## PlaceholderAPI
 
@@ -70,7 +77,9 @@ The internal expansion identifier is `plexonshops`:
 - `%plexonshops_total%`
 - `%plexonshops_open%`
 - `%plexonshops_owned%`
+- `%plexonshops_subshops%`
 - `%plexonshops_name%`
+- `%plexonshops_primary_name%`
 - `%plexonshops_status%`
 - `%plexonshops_rating%`
 - `%plexonshops_visitors%`
@@ -81,10 +90,11 @@ Player-specific values use the player's oldest owned shop when several exist.
 ## Building
 
 ```bash
-./gradlew clean test javadoc shadowJar
+./gradlew clean test javadoc shadowJar verifyDistribution
 ```
 
-The installable JAR is written to `build/libs/PlexonShops-<version>.jar`.
+The self-contained installable JAR is written to
+`build/libs/PlexonShops-<version>.jar`.
 See [Development](docs/DEVELOPMENT.md) and [Architecture](docs/ARCHITECTURE.md)
 for runtime boundaries and release details.
 

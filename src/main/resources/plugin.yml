@@ -2,7 +2,7 @@ name: PlexonShops
 version: '${version}'
 main: com.plexon.shops.PlexonShops
 description: GUI-first player shop directory for the Plexon ecosystem.
-api-version: '1.21'
+api-version: '26.2'
 load: POSTWORLD
 author: ZpkDxGames
 website: https://github.com/ZpkDxGames/PlexonShops
@@ -22,7 +22,7 @@ permissions:
     default: true
   plexonshops.create:
     description: Creates and manages personal shops.
-    default: true
+    default: false
   plexonshops.admin:
     description: Grants every PlexonShops administrative capability.
     default: op
@@ -31,6 +31,9 @@ permissions:
       plexonshops.create: true
       plexonshops.reload: true
       plexonshops.format: true
+      plexonshops.teleport.cooldown.bypass: true
+      plexonshops.teleport.fee.bypass: true
+      plexonshops.subshops.unlimited: true
       plexonshops.limit.unlimited: true
   plexonshops.reload:
     description: Reloads PlexonShops configuration and language files.
@@ -39,5 +42,14 @@ permissions:
     description: Allows MiniMessage formatting in owned shop text.
     default: op
   plexonshops.limit.unlimited:
-    description: Bypasses the per-player shop limit.
+    description: Legacy alias that bypasses the per-player shop limit.
+    default: false
+  plexonshops.subshops.unlimited:
+    description: Bypasses the per-player sub-shop limit.
+    default: false
+  plexonshops.teleport.cooldown.bypass:
+    description: Bypasses the shop teleport cooldown.
+    default: op
+  plexonshops.teleport.fee.bypass:
+    description: Bypasses all shop teleport fees.
     default: false

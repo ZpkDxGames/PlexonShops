@@ -54,7 +54,7 @@ public final class PlexonShops extends JavaPlugin {
 
         try {
             PluginConfig initialConfig = PluginConfig.load(new File(getDataFolder(), "config.yml"));
-            MessageService initialMessages = MessageService.load(new File(getDataFolder(), "messages.yml"));
+            MessageService initialMessages = loadMessages();
             runtimeConfig.set(initialConfig);
             messageService.set(initialMessages);
 
@@ -142,7 +142,7 @@ public final class PlexonShops extends JavaPlugin {
         PluginConfig active = runtimeConfig.get();
         return worker.supply(() -> {
             PluginConfig loaded = PluginConfig.load(new File(getDataFolder(), "config.yml"));
-            MessageService loadedMessages = MessageService.load(new File(getDataFolder(), "messages.yml"));
+            MessageService loadedMessages = loadMessages();
             if (!loaded.database().equals(active.database())) {
                 getLogger().warning("Database settings changed during reload; they take effect after a restart.");
             }
@@ -213,6 +213,13 @@ public final class PlexonShops extends JavaPlugin {
             getLogger().warning("PlaceholderAPI rejected the PlexonShops expansion registration.");
             expansion = null;
         }
+    }
+
+    private MessageService loadMessages() {
+        return MessageService.load(
+                new File(getDataFolder(), "messages.yml"),
+                getResource("messages.yml")
+        );
     }
 
     private record ReloadBundle(PluginConfig config, MessageService messages) {

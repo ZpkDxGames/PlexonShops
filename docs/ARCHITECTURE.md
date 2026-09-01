@@ -34,12 +34,24 @@ All GUI slots and content grids are validated against their configured inventory
 size before use.
 
 Free-form shop names, descriptions, labels, and fees begin from GUI buttons and
-use one-shot, expiring chat prompts. Players without `plexonshops.format` have
-MiniMessage tags escaped before storage.
+use one-shot, expiring chat prompts. Player formatting is restricted to colors,
+gradients, rainbows, and decorations; event-producing tags are never resolved.
+Players without `plexonshops.format` have both MiniMessage and converted legacy
+color tags escaped before storage. Display limits count visible code points,
+not markup bytes, and corrupt legacy values render as literal text instead of
+breaking a GUI or chat message.
+
+The oldest owned shop is presented as the primary shop and later shops as
+sub-shops. This is derived from the stable creation order, so the 2.0 upgrade
+requires no destructive database migration. `plexonshops.subshops.N` represents
+additional capacity; legacy total-limit permissions remain accepted.
 
 ## Teleports and economy
 
-Warmups remember the player's block position and cancel on block movement.
+Warmups remember the player's exact position and cancel on movement or damage.
+An Adventure bossbar reports remaining time, while configurable sounds and
+particles communicate departure and arrival. Successful teleports start a
+per-player cooldown unless an owner/configuration or permission bypass applies.
 At completion, the shop and destination are revalidated, Vault is charged on
 the server thread, and Paper `teleportAsync` loads and transfers safely. A failed
 teleport refunds the exact amount withdrawn.

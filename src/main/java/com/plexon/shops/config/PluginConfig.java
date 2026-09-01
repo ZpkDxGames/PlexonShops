@@ -69,10 +69,29 @@ public record PluginConfig(
                 yaml.getBoolean("teleport.enabled", true),
                 Math.clamp(yaml.getInt("teleport.warmup-seconds", 3), 0, 300),
                 yaml.getBoolean("teleport.cancel-on-movement", true),
+                yaml.getBoolean("teleport.cancel-on-damage", true),
+                Math.clamp(yaml.getInt("teleport.cooldown-seconds", 10), 0, 3_600),
+                yaml.getBoolean("teleport.owners-bypass-cooldown", true),
                 yaml.getBoolean("teleport.economy-enabled", true),
                 yaml.getBoolean("teleport.fail-open-without-vault", false),
                 yaml.getBoolean("teleport.owners-can-set-fee", true),
-                Math.max(0.0D, yaml.getDouble("teleport.maximum-owner-fee", 5_000.0D))
+                yaml.getBoolean("teleport.owners-bypass-fee", true),
+                Math.max(0.0D, yaml.getDouble("teleport.maximum-owner-fee", 5_000.0D)),
+                new TeleportBossBar(
+                        yaml.getBoolean("teleport.bossbar.enabled", true),
+                        yaml.getString("teleport.bossbar.color", "BLUE"),
+                        yaml.getString("teleport.bossbar.overlay", "PROGRESS"),
+                        Math.clamp(yaml.getInt("teleport.bossbar.update-interval-ticks", 2), 1, 20)
+                ),
+                new TeleportEffects(
+                        yaml.getBoolean("teleport.effects.enabled", true),
+                        yaml.getString("teleport.effects.warmup-sound", "minecraft:block.beacon.power_select"),
+                        yaml.getString("teleport.effects.arrival-sound", "minecraft:entity.enderman.teleport"),
+                        (float) Math.clamp(yaml.getDouble("teleport.effects.volume", 0.8D), 0.0D, 4.0D),
+                        (float) Math.clamp(yaml.getDouble("teleport.effects.warmup-pitch", 1.25D), 0.5D, 2.0D),
+                        (float) Math.clamp(yaml.getDouble("teleport.effects.arrival-pitch", 1.0D), 0.5D, 2.0D),
+                        Math.clamp(yaml.getInt("teleport.effects.portal-particles", 32), 0, 256)
+                )
         );
         Prompts prompts = new Prompts(
                 yaml.getString("chat-prompts.cancel-word", "cancel"),
@@ -174,16 +193,59 @@ public record PluginConfig(
             boolean enabled,
             int warmupSeconds,
             boolean cancelOnMovement,
+            boolean cancelOnDamage,
+            int cooldownSeconds,
+            boolean ownersBypassCooldown,
             boolean economyEnabled,
             boolean failOpenWithoutVault,
             boolean ownersCanSetFee,
-            double maximumOwnerFee
+            boolean ownersBypassFee,
+            double maximumOwnerFee,
+            TeleportBossBar bossBar,
+            TeleportEffects effects
     ) {
+        public Teleport {
+            bossBar = bossBar == null ? new TeleportBossBar(true, "BLUE", "PROGRESS", 2) : bossBar;
+            effects = effects == null
+                    ? new TeleportEffects(true, "minecraft:block.beacon.power_select",
+                    "minecraft:entity.enderman.teleport", 0.8F, 1.25F, 1.0F, 32)
+                    : effects;
+        }
+    }
+
+    public record TeleportBossBar(boolean enabled, String color, String overlay, int updateIntervalTicks) {
+        public TeleportBossBar {
+            color = normalizedEnum(color, "BLUE");
+            overlay = normalizedEnum(overlay, "PROGRESS");
+        }
+    }
+
+    public record TeleportEffects(
+            boolean enabled,
+            String warmupSound,
+            String arrivalSound,
+            float volume,
+            float warmupPitch,
+            float arrivalPitch,
+            int portalParticles
+    ) {
+        public TeleportEffects {
+            warmupSound = normalizedKey(warmupSound, "minecraft:block.beacon.power_select");
+            arrivalSound = normalizedKey(arrivalSound, "minecraft:entity.enderman.teleport");
+        }
     }
 
     public record Prompts(String cancelWord, int timeoutSeconds) {
         public Prompts {
             cancelWord = cancelWord == null || cancelWord.isBlank() ? "cancel" : cancelWord.trim();
         }
+    }
+
+    private static String normalizedEnum(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value.strip().toUpperCase(Locale.ROOT);
+    }
+
+    private static String normalizedKey(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value.strip().toLowerCase(Locale.ROOT);
     }
 }

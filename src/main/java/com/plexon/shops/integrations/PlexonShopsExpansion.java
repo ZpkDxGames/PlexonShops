@@ -47,7 +47,11 @@ public final class PlexonShopsExpansion extends PlaceholderExpansion {
             case "total" -> Integer.toString(shops.totalCount());
             case "open" -> Integer.toString(shops.openCount());
             case "owned" -> player == null ? "0" : Integer.toString(shops.ownedBy(player.getUniqueId()).size());
+            case "subshops" -> player == null ? "0" : Integer.toString(
+                    Math.max(0, shops.ownedBy(player.getUniqueId()).size() - 1)
+            );
             case "name" -> first(player).map(Shop::name).orElse("");
+            case "primary_name" -> first(player).map(Shop::name).orElse("");
             case "status" -> first(player).map(shop -> shop.status().name()).orElse("NONE");
             case "rating" -> first(player).map(shop -> String.format(Locale.ROOT, "%.2f", shop.averageRating())).orElse("0.00");
             case "visitors" -> first(player).map(shop -> Long.toString(shop.visitors().totalVisits())).orElse("0");

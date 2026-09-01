@@ -97,14 +97,29 @@ public final class ShopService {
 
     public int shopLimit(Player player) {
         PluginConfig.Limits limits = config.get().limits();
-        if (player.hasPermission("plexonshops.limit.unlimited")) {
+        if (player.hasPermission("plexonshops.subshops.unlimited")
+                || player.hasPermission("plexonshops.limit.unlimited")) {
             return Integer.MAX_VALUE;
         }
-        return PermissionLimitResolver.resolve(
+        int legacyTotal = PermissionLimitResolver.resolve(
                 candidate -> player.hasPermission("plexonshops.limit." + candidate),
                 limits.maxShopsPerPlayer(),
                 limits.maximumPermissionLimit()
         );
+        int additional = PermissionLimitResolver.resolve(
+                candidate -> player.hasPermission("plexonshops.subshops." + candidate),
+                0,
+                limits.maximumPermissionLimit()
+        );
+        return Math.max(legacyTotal, Math.addExact(1, additional));
+    }
+
+    public ShopCapacity capacity(Player player) {
+        int owned = ownedBy(player.getUniqueId()).size();
+        int totalLimit = shopLimit(player);
+        int subShops = Math.max(0, owned - 1);
+        int subShopLimit = totalLimit == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, totalLimit - 1);
+        return new ShopCapacity(owned, totalLimit, subShops, subShopLimit);
     }
 
     public CompletableFuture<Shop> create(UUID ownerUuid, String ownerName, ShopLocation location) {
@@ -282,5 +297,15 @@ public final class ShopService {
 
     private long now() {
         return Instant.now().getEpochSecond();
+    }
+
+    public record ShopCapacity(int owned, int totalLimit, int subShops, int subShopLimit) {
+        public boolean atLimit() {
+            return totalLimit != Integer.MAX_VALUE && owned >= totalLimit;
+        }
+
+        public boolean nextIsSubShop() {
+            return owned > 0;
+        }
     }
 }
