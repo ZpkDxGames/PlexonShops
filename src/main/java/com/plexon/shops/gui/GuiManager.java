@@ -133,50 +133,93 @@ public final class GuiManager {
     }
 
     public void openOwnerManagement(Player player) {
-        List<Shop> owned = shops.ownedBy(player.getUniqueId());
-        if (owned.isEmpty()) {
-            openCreate(player);
-        } else if (owned.size() == 1) {
-            openManage(player, owned.getFirst().id());
-        } else {
-            openOwnerSelector(player, 0);
-        }
+        openOwnerSelector(player, 0);
     }
 
     public void openOwnerSelector(Player player, int requestedPage) {
         GuiLayout layout = config.get().gui("owner-selector", 54);
         List<Integer> contentSlots = contentSlots(layout, 0, Math.min(45, layout.size()));
-        PageSlice<Shop> page = slice(shops.ownedBy(player.getUniqueId()), requestedPage, contentSlots.size());
+        List<Shop> owned = shops.ownedBy(player.getUniqueId());
+        ShopService.ShopCapacity capacity = shops.capacity(player);
+        PageSlice<Shop> page = slice(owned, requestedPage, contentSlots.size());
+        MessageService messageService = messages.get();
         PlexonGuiHolder holder = new PlexonGuiHolder(GuiType.OWNER_SELECTOR, null, page.page(), DirectoryFilter.ALL);
-        Inventory inventory = createInventory(holder, layout, messages.get().get("gui.owner-selector-title"));
+        Inventory inventory = createInventory(holder, layout, messageService.get(
+                "gui.owner-selector-title",
+                Placeholder.unparsed("owned", Integer.toString(capacity.owned())),
+                Placeholder.unparsed("limit", formatLimit(capacity.totalLimit()))
+        ));
 
         for (int index = 0; index < page.items().size(); index++) {
             int slot = contentSlots.get(index);
             Shop shop = page.items().get(index);
             holder.target(slot, shop.id());
-            put(inventory, slot, ownerShopItem(shop));
+            int absoluteIndex = page.page() * contentSlots.size() + index;
+            put(inventory, slot, ownerShopItem(shop, absoluteIndex, owned.size()));
         }
         put(inventory, layout.slot("previous", 45), button(Material.ARROW, "gui.previous"));
+        put(inventory, layout.slot("overview", 47), items.create(
+                Material.COMPASS,
+                messageService.get("gui.owner-overview"),
+                messageService.list(
+                        "gui.owner-overview-lore",
+                        Placeholder.unparsed("owned", Integer.toString(capacity.owned())),
+                        Placeholder.unparsed("limit", formatLimit(capacity.totalLimit())),
+                        Placeholder.unparsed("subshops", Integer.toString(capacity.subShops())),
+                        Placeholder.unparsed("sublimit", formatLimit(capacity.subShopLimit()))
+                ),
+                false
+        ));
         put(inventory, layout.slot("back", 48), button(Material.DARK_OAK_DOOR, "gui.back"));
         put(inventory, layout.slot("create", 49), items.create(
-                Material.LIME_DYE,
-                messages.get().get("gui.create"),
-                messages.get().list("gui.create-lore"),
-                false
+                capacity.atLimit() ? Material.RED_DYE : Material.LIME_DYE,
+                messageService.get(capacity.nextIsSubShop() ? "gui.create-subshop" : "gui.create-primary"),
+                messageService.list(
+                        capacity.atLimit() ? "gui.create-locked-lore" : "gui.create-lore",
+                        Placeholder.unparsed("owned", Integer.toString(capacity.owned())),
+                        Placeholder.unparsed("limit", formatLimit(capacity.totalLimit())),
+                        Placeholder.unparsed("subshops", Integer.toString(capacity.subShops())),
+                        Placeholder.unparsed("sublimit", formatLimit(capacity.subShopLimit()))
+                ),
+                !capacity.atLimit()
         ));
         put(inventory, layout.slot("next", 53), button(Material.ARROW, "gui.next"));
         player.openInventory(inventory);
     }
 
     public void openCreate(Player player) {
+        ShopService.ShopCapacity capacity = shops.capacity(player);
+        if (capacity.atLimit()) {
+            messages.get().send(player, "shop-limit",
+                    Placeholder.unparsed("current", Integer.toString(capacity.owned())),
+                    Placeholder.unparsed("limit", formatLimit(capacity.totalLimit())));
+            openOwnerSelector(player, 0);
+            return;
+        }
         GuiLayout layout = config.get().gui("create", 27);
         PlexonGuiHolder holder = new PlexonGuiHolder(GuiType.CREATE, null, 0, DirectoryFilter.ALL);
-        Inventory inventory = createInventory(holder, layout, messages.get().get("gui.create-title"));
+        MessageService messageService = messages.get();
+        Inventory inventory = createInventory(holder, layout, messageService.get(
+                "gui.create-title",
+                shopTypeResolver(capacity.nextIsSubShop())
+        ));
         put(inventory, layout.slot("confirm", 11), items.create(
                 Material.LIME_CONCRETE,
-                messages.get().get("gui.confirm"),
-                messages.get().list("gui.create-lore"),
+                messageService.get("gui.confirm"),
+                messageService.list("gui.create-lore",
+                        Placeholder.unparsed("owned", Integer.toString(capacity.owned())),
+                        Placeholder.unparsed("limit", formatLimit(capacity.totalLimit())),
+                        Placeholder.unparsed("subshops", Integer.toString(capacity.subShops())),
+                        Placeholder.unparsed("sublimit", formatLimit(capacity.subShopLimit()))),
                 true
+        ));
+        put(inventory, layout.slot("info", 13), items.create(
+                capacity.nextIsSubShop() ? Material.ENDER_CHEST : Material.CHEST,
+                messageService.get("gui.create-info", shopTypeResolver(capacity.nextIsSubShop())),
+                messageService.list("gui.create-info-lore",
+                        Placeholder.unparsed("number", Integer.toString(capacity.owned() + 1)),
+                        Placeholder.unparsed("limit", formatLimit(capacity.totalLimit()))),
+                false
         ));
         put(inventory, layout.slot("cancel", 15), button(Material.RED_CONCRETE, "gui.cancel"));
         player.openInventory(inventory);
@@ -192,7 +235,29 @@ public final class GuiManager {
         PlexonGuiHolder holder = new PlexonGuiHolder(GuiType.MANAGE, shop.id(), 0, DirectoryFilter.ALL);
         Inventory inventory = createInventory(holder, layout, messageService.get(
                 "gui.manage-title",
-                TagResolver.resolver("shop", Tag.inserting(messageService.stored(shop.name())))
+                messageService.storedTag("shop", shop.name())
+        ));
+
+        List<Shop> owned = shops.ownedBy(player.getUniqueId());
+        int position = Math.max(0, owned.indexOf(shop));
+        ShopService.ShopCapacity capacity = shops.capacity(player);
+        put(inventory, layout.slot("overview", 4), items.create(
+                position == 0 ? Material.CHEST : Material.ENDER_CHEST,
+                messageService.get("gui.shop-overview", shopTypeResolver(position > 0)),
+                messageService.list(
+                        "gui.shop-overview-lore",
+                        Placeholder.unparsed("position", Integer.toString(position + 1)),
+                        Placeholder.unparsed("owned", Integer.toString(owned.size())),
+                        Placeholder.unparsed("limit", formatLimit(capacity.totalLimit())),
+                        Placeholder.unparsed("world", shop.location().worldName()),
+                        Placeholder.unparsed("x", Integer.toString((int) Math.floor(shop.location().x()))),
+                        Placeholder.unparsed("y", Integer.toString((int) Math.floor(shop.location().y()))),
+                        Placeholder.unparsed("z", Integer.toString((int) Math.floor(shop.location().z()))),
+                        Placeholder.unparsed("rating", String.format(Locale.ROOT, "%.2f", shop.averageRating())),
+                        Placeholder.unparsed("total", Long.toString(shop.visitors().totalVisits())),
+                        Placeholder.unparsed("unique", Integer.toString(shop.visitors().uniqueCount()))
+                ),
+                position == 0
         ));
 
         put(inventory, layout.slot("status", 10), items.create(
@@ -307,7 +372,7 @@ public final class GuiManager {
             put(inventory, slot, items.decorate(
                     item,
                     messages.get().stored(labeled.label()),
-                    messages.get().list("gui.label-lore", Placeholder.unparsed("label", labeled.label())),
+                    messages.get().list("gui.label-lore", messages.get().storedTag("label", labeled.label())),
                     false
             ));
             holder.target(slot, labeled.id());
@@ -334,7 +399,7 @@ public final class GuiManager {
         PlexonGuiHolder holder = new PlexonGuiHolder(GuiType.RATING, shop.id(), 0, DirectoryFilter.ALL);
         Inventory inventory = createInventory(holder, layout, messages.get().get(
                 "gui.rating-title",
-                TagResolver.resolver("shop", Tag.inserting(messages.get().stored(shop.name())))
+                messages.get().storedTag("shop", shop.name())
         ));
         int current = shop.ratingFrom(player.getUniqueId());
         for (int stars = 1; stars <= 5; stars++) {
@@ -381,7 +446,7 @@ public final class GuiManager {
         playClick(player);
         switch (holder.type()) {
             case DIRECTORY -> handleDirectory(player, holder, slot, event.isRightClick());
-            case OWNER_SELECTOR -> handleOwnerSelector(player, holder, slot);
+            case OWNER_SELECTOR -> handleOwnerSelector(player, holder, slot, event.isRightClick());
             case CREATE -> handleCreate(player, slot);
             case MANAGE -> handleManage(player, holder, slot);
             case CATEGORIES -> handleCategories(player, holder, slot);
@@ -424,7 +489,7 @@ public final class GuiManager {
         }
     }
 
-    private void handleOwnerSelector(Player player, PlexonGuiHolder holder, int slot) {
+    private void handleOwnerSelector(Player player, PlexonGuiHolder holder, int slot, boolean rightClick) {
         GuiLayout layout = config.get().gui("owner-selector", 54);
         if (slot == layout.slot("previous", 45)) {
             openOwnerSelector(player, holder.page() - 1);
@@ -435,14 +500,21 @@ public final class GuiManager {
         } else if (slot == layout.slot("create", 49)) {
             openCreateWithLimitCheck(player);
         } else {
-            holder.target(slot).ifPresent(shopId -> openManage(player, shopId));
+            holder.target(slot).flatMap(shops::find).ifPresent(shop -> {
+                if (rightClick) {
+                    player.closeInventory();
+                    teleports.request(player, shop);
+                } else {
+                    openManage(player, shop.id());
+                }
+            });
         }
     }
 
     private void handleCreate(Player player, int slot) {
         GuiLayout layout = config.get().gui("create", 27);
         if (slot == layout.slot("cancel", 15)) {
-            openDirectory(player);
+            openOwnerSelector(player, 0);
             return;
         }
         if (slot != layout.slot("confirm", 11)) {
@@ -466,7 +538,7 @@ public final class GuiManager {
                 player.getName(),
                 ShopLocation.from(player.getLocation())
         ), created -> {
-            messages.get().send(player, "shop-created", Placeholder.unparsed("shop", created.name()));
+            messages.get().send(player, "shop-created", messages.get().storedTag("shop", created.name()));
             openManage(player, created.id());
         });
     }
@@ -512,12 +584,7 @@ public final class GuiManager {
         } else if (slot == layout.slot("delete", 45)) {
             openDeleteConfirm(player, shop.id());
         } else if (slot == layout.slot("back", 49)) {
-            List<Shop> owned = shops.ownedBy(player.getUniqueId());
-            if (owned.size() > 1) {
-                openOwnerSelector(player, 0);
-            } else {
-                openDirectory(player);
-            }
+            openOwnerSelector(player, 0);
         }
     }
 
@@ -652,7 +719,7 @@ public final class GuiManager {
             openManage(player, shop.id());
         } else if (slot == layout.slot("confirm", 11)) {
             finish(player, shops.delete(shop.id()), deleted -> {
-                messages.get().send(player, "shop-deleted", Placeholder.unparsed("shop", deleted.name()));
+                messages.get().send(player, "shop-deleted", messages.get().storedTag("shop", deleted.name()));
                 openOwnerManagement(player);
             });
         }
@@ -759,6 +826,7 @@ public final class GuiManager {
     private ItemStack directoryShopItem(Shop shop) {
         MessageService messageService = messages.get();
         ItemStack base = ItemStackCodec.decode(shop.displayIconData()).orElseGet(() -> ownerHead(shop));
+        int ownerPosition = Math.max(0, shops.ownedBy(shop.ownerUuid()).indexOf(shop));
         List<Component> lore = new ArrayList<>();
         shop.description().forEach(line -> lore.add(messageService.stored(line)));
         if (!shop.description().isEmpty()) {
@@ -767,6 +835,7 @@ public final class GuiManager {
         lore.addAll(messageService.list(
                 "gui.shop-lore",
                 Placeholder.unparsed("owner", shop.ownerName()),
+                shopTypeResolver(ownerPosition > 0),
                 Placeholder.unparsed("categories", categoryNames(shop.categories())),
                 statusResolver(shop.status()),
                 Placeholder.unparsed("rating", shop.starBar()),
@@ -778,25 +847,35 @@ public final class GuiManager {
         return items.decorate(
                 base,
                 messageService.get("gui.shop-name",
-                        TagResolver.resolver("shop", Tag.inserting(messageService.stored(shop.name())))),
+                        messageService.storedTag("shop", shop.name())),
                 lore,
                 shop.status() == ShopStatus.OPEN
         );
     }
 
-    private ItemStack ownerShopItem(Shop shop) {
+    private ItemStack ownerShopItem(Shop shop, int position, int owned) {
         ItemStack base = ItemStackCodec.decode(shop.displayIconData()).orElseGet(() -> ownerHead(shop));
+        MessageService messageService = messages.get();
         return items.decorate(
                 base,
-                messages.get().stored(shop.name()),
-                List.of(
-                        messages.get().raw("<gray>Status:</gray> <status>", statusResolver(shop.status())),
-                        messages.get().raw("<gray>Categories:</gray> <white><categories></white>",
-                                Placeholder.unparsed("categories", categoryNames(shop.categories()))),
-                        Component.empty(),
-                        messages.get().raw("<aqua>Click to manage</aqua>")
+                messageService.get("gui.owner-shop-name", messageService.storedTag("shop", shop.name())),
+                messageService.list(
+                        "gui.owner-shop-lore",
+                        shopTypeResolver(position > 0),
+                        Placeholder.unparsed("position", Integer.toString(position + 1)),
+                        Placeholder.unparsed("owned", Integer.toString(owned)),
+                        statusResolver(shop.status()),
+                        Placeholder.unparsed("categories", categoryNames(shop.categories())),
+                        Placeholder.unparsed("world", shop.location().worldName()),
+                        Placeholder.unparsed("x", Integer.toString((int) Math.floor(shop.location().x()))),
+                        Placeholder.unparsed("y", Integer.toString((int) Math.floor(shop.location().y()))),
+                        Placeholder.unparsed("z", Integer.toString((int) Math.floor(shop.location().z()))),
+                        Placeholder.unparsed("rating", String.format(Locale.ROOT, "%.2f", shop.averageRating())),
+                        Placeholder.unparsed("total", Long.toString(shop.visitors().totalVisits())),
+                        Placeholder.unparsed("unique", Integer.toString(shop.visitors().uniqueCount())),
+                        Placeholder.unparsed("fee", economy.format(shop.teleportFee()))
                 ),
-                false
+                shop.status() == ShopStatus.OPEN
         );
     }
 
@@ -824,12 +903,11 @@ public final class GuiManager {
     }
 
     private void openCreateWithLimitCheck(Player player) {
-        int current = shops.ownedBy(player.getUniqueId()).size();
-        int limit = shops.shopLimit(player);
-        if (current >= limit) {
+        ShopService.ShopCapacity capacity = shops.capacity(player);
+        if (capacity.atLimit()) {
             messages.get().send(player, "shop-limit",
-                    Placeholder.unparsed("current", Integer.toString(current)),
-                    Placeholder.unparsed("limit", formatLimit(limit)));
+                    Placeholder.unparsed("current", Integer.toString(capacity.owned())),
+                    Placeholder.unparsed("limit", formatLimit(capacity.totalLimit())));
             return;
         }
         openCreate(player);
@@ -852,15 +930,11 @@ public final class GuiManager {
     }
 
     private boolean validText(String value, int maximum) {
-        if (value == null || value.isBlank() || value.length() > maximum) {
+        if (value == null || messages.get().plainStored(value).isBlank()
+                || messages.get().visibleLength(value) > maximum) {
             return false;
         }
-        try {
-            messages.get().stored(value);
-            return true;
-        } catch (RuntimeException invalidMiniMessage) {
-            return false;
-        }
+        return true;
     }
 
     private <T> void finish(Player player, CompletableFuture<T> future, Consumer<T> success) {
@@ -916,6 +990,11 @@ public final class GuiManager {
             case MAINTENANCE -> messages.get().raw("<yellow>MAINTENANCE</yellow>");
         };
         return TagResolver.resolver("status", Tag.inserting(component));
+    }
+
+    private TagResolver shopTypeResolver(boolean subShop) {
+        Component component = messages.get().get(subShop ? "gui.type-subshop" : "gui.type-primary");
+        return TagResolver.resolver("type", Tag.inserting(component));
     }
 
     private void playClick(Player player) {
