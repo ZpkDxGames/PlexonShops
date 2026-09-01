@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     java
 }
@@ -113,7 +115,7 @@ val verifyDistribution = tasks.register("verifyDistribution") {
         require(archive.isFile && archive.length() > 1_000_000L) {
             "Installable JAR is missing or unexpectedly small: $archive"
         }
-        java.util.zip.ZipFile(archive).use { zip ->
+        ZipFile(archive).use { zip ->
             listOf(
                 "plugin.yml",
                 "com/plexon/shops/PlexonShops.class",
