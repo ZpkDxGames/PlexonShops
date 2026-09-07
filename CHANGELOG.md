@@ -2,6 +2,21 @@
 
 All notable changes to PlexonShops are documented here.
 
+## 2.1.0 - 2026-09-07
+
+- Added optional PlexonCore 1.x integration with isolated CORE/STANDALONE bridging and module lifecycle health.
+- Registered Core module `shops` with shop engine, directory, API, event, ratings, visitors, SQLite, and Vault capabilities.
+- Added stable Bukkit `PlexonShopsAPI` and immutable `ShopView` read models.
+- Added exact `PlexonShopCreatedEvent`, `PlexonShopRatedEvent`, and `PlexonShopVisitedEvent` classes required by PlexonQuests 3.1.0.
+- Added unique event IDs and transaction IDs for durable integration deduplication.
+- Added centralized main-thread `ShopEventPublisher` so synchronous Bukkit events are never dispatched from persistence workers.
+- Creation events now fire only after successful shop persistence and cache insertion.
+- Rating events now fire only after successful rating persistence and cache replacement, with previous/current rating metadata.
+- Visit recording now exposes asynchronous completion and emits a visit event only after successful teleport, visit persistence, and cache replacement.
+- Preserved existing SQLite/Hikari data, GUI behavior, sub-shops, ratings, visitor statistics, teleport cooldowns, Vault charge/refund semantics, PlaceholderAPI, and MiniMessage formatting.
+- Added pinned PlexonCore 1.0.0 CI provisioning, Core no-shading verification, event/API distribution verification, and public event contract tests.
+- Added API, PlexonCore, and 2.1 migration documentation.
+
 ## 2.0.0 - 2026-09-01
 
 - Updated the build, bytecode, and plugin metadata for Paper 26.2 and Java 25.
