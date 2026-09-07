@@ -82,8 +82,11 @@ jobs:
           fi
 
           mkdir -p build/release
-          (cd "$(dirname "$JAR")" && sha256sum "$(basename "$JAR")") > "$CHECKSUM"
-          sha256sum --check "$CHECKSUM" --ignore-missing
+          (
+            cd "$(dirname "$JAR")"
+            sha256sum "$(basename "$JAR")" > ../release/SHA256SUMS.txt
+            sha256sum --check ../release/SHA256SUMS.txt
+          )
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release upload "$RELEASE_TAG" "$JAR" "$CHECKSUM" --clobber
