@@ -204,25 +204,30 @@ public final class ShopService {
         if (stars < 1 || stars > 5) {
             return CompletableFuture.failedFuture(new IllegalArgumentException("Stars must be between 1 and 5"));
         }
-        Shop shop = find(shopId).orElse(null);
-        if (shop == null) {
-            return CompletableFuture.failedFuture(new IllegalArgumentException("Shop does not exist"));
+        synchronized (mutationLock) {
+            CompletableFuture<Void> previous = mutationChains.getOrDefault(shopId, CompletableFuture.completedFuture(null));
+            CompletableFuture<Shop> result = previous.thenCompose(ignored -> {
+                Shop current = cache.find(shopId).orElse(null);
+                if (current == null) {
+                    return CompletableFuture.failedFuture(new IllegalArgumentException("Shop does not exist"));
+                }
+                if (current.ownerUuid().equals(playerUuid)) {
+                    return CompletableFuture.failedFuture(new IllegalStateException("Owners cannot rate their own shop"));
+                }
+                int previousRating = current.ratingFrom(playerUuid);
+                if (previousRating == stars) {
+                    return CompletableFuture.completedFuture(current);
+                }
+                Shop updated = current.withRating(playerUuid, stars, now());
+                return repository.saveRating(updated.id(), updated.ratings().get(playerUuid)).thenApply(nothing -> {
+                    cache.put(updated);
+                    events.publishRated(playerUuid, updated, previousRating);
+                    return updated;
+                });
+            });
+            trackTail(shopId, result);
+            return result;
         }
-        if (shop.ownerUuid().equals(playerUuid)) {
-            return CompletableFuture.failedFuture(new IllegalStateException("Owners cannot rate their own shop"));
-        }
-        int[] previousRating = {0};
-        return mutate(
-                shopId,
-                current -> {
-                    previousRating[0] = current.ratingFrom(playerUuid);
-                    return current.withRating(playerUuid, stars, now());
-                },
-                updated -> repository.saveRating(updated.id(), updated.ratings().get(playerUuid))
-        ).thenApply(updated -> {
-            events.publishRated(playerUuid, updated, previousRating[0]);
-            return updated;
-        });
     }
 
     public CompletableFuture<Shop> recordVisit(UUID shopId, UUID playerUuid) {
