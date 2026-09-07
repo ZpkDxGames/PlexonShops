@@ -7,6 +7,7 @@ load: POSTWORLD
 author: ZpkDxGames
 website: https://github.com/ZpkDxGames/PlexonShops
 softdepend:
+  - PlexonCore
   - Vault
   - PlaceholderAPI
 

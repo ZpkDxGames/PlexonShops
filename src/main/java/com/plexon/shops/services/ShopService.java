@@ -1,6 +1,7 @@
 package com.plexon.shops.services;
 
 import com.plexon.shops.config.PluginConfig;
+import com.plexon.shops.event.ShopEventPublisher;
 import com.plexon.shops.models.Category;
 import com.plexon.shops.models.DirectoryFilter;
 import com.plexon.shops.models.LabeledItem;
@@ -21,13 +22,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Supplier;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-/** Domain operations with optimistic cache updates and asynchronous durability. */
+/** Domain operations with ordered asynchronous durability and post-commit public events. */
 public final class ShopService {
     private static final Comparator<Shop> DIRECTORY_ORDER = Comparator
             .comparing((Shop shop) -> shop.status() == ShopStatus.OPEN ? 0 : 1)
@@ -39,6 +40,7 @@ public final class ShopService {
     private final ShopRepository repository;
     private final Supplier<PluginConfig> config;
     private final Logger logger;
+    private final ShopEventPublisher events;
     private final Object mutationLock = new Object();
     private final Map<UUID, CompletableFuture<Void>> mutationChains = new HashMap<>();
 
@@ -46,12 +48,14 @@ public final class ShopService {
             ShopCache cache,
             ShopRepository repository,
             Supplier<PluginConfig> config,
-            Logger logger
+            Logger logger,
+            ShopEventPublisher events
     ) {
         this.cache = cache;
         this.repository = repository;
         this.config = config;
         this.logger = logger;
+        this.events = events;
     }
 
     public void load(List<Shop> shops) {
@@ -145,6 +149,7 @@ public final class ShopService {
         );
         return repository.save(shop).thenApply(ignored -> {
             cache.put(shop);
+            events.publishCreated(ownerUuid, shop);
             return shop;
         });
     }
@@ -206,22 +211,38 @@ public final class ShopService {
         if (shop.ownerUuid().equals(playerUuid)) {
             return CompletableFuture.failedFuture(new IllegalStateException("Owners cannot rate their own shop"));
         }
+        int[] previousRating = {0};
         return mutate(
                 shopId,
-                current -> current.withRating(playerUuid, stars, now()),
+                current -> {
+                    previousRating[0] = current.ratingFrom(playerUuid);
+                    return current.withRating(playerUuid, stars, now());
+                },
                 updated -> repository.saveRating(updated.id(), updated.ratings().get(playerUuid))
-        );
+        ).thenApply(updated -> {
+            events.publishRated(playerUuid, updated, previousRating[0]);
+            return updated;
+        });
     }
 
-    public void recordVisit(UUID shopId, UUID playerUuid) {
-        mutate(
+    public CompletableFuture<Shop> recordVisit(UUID shopId, UUID playerUuid) {
+        boolean[] uniqueVisitor = {false};
+        CompletableFuture<Shop> result = mutate(
                 shopId,
-                shop -> shop.withVisit(playerUuid, now()),
+                shop -> {
+                    uniqueVisitor[0] = !shop.visitors().uniqueVisitors().containsKey(playerUuid);
+                    return shop.withVisit(playerUuid, now());
+                },
                 updated -> repository.recordVisit(updated, updated.visitors().uniqueVisitors().get(playerUuid))
-        ).exceptionally(error -> {
+        ).thenApply(updated -> {
+            events.publishVisited(playerUuid, updated, uniqueVisitor[0]);
+            return updated;
+        });
+        result.exceptionally(error -> {
             logger.log(Level.WARNING, "Could not persist visitor statistics for shop " + shopId, error);
             return null;
         });
+        return result;
     }
 
     public void touchOwner(UUID ownerUuid, String ownerName) {

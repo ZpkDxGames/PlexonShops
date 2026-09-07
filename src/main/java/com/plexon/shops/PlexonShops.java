@@ -1,8 +1,13 @@
 package com.plexon.shops;
 
+import com.plexon.shops.api.DefaultPlexonShopsAPI;
+import com.plexon.shops.api.PlexonShopsAPI;
 import com.plexon.shops.commands.PlexonShopsCommand;
 import com.plexon.shops.config.PluginConfig;
+import com.plexon.shops.event.ShopEventPublisher;
 import com.plexon.shops.gui.GuiManager;
+import com.plexon.shops.integration.core.CoreBridge;
+import com.plexon.shops.integration.core.CoreBridgeFactory;
 import com.plexon.shops.integrations.PlexonShopsExpansion;
 import com.plexon.shops.integrations.VaultEconomyHook;
 import com.plexon.shops.listeners.GuiListener;
@@ -20,6 +25,7 @@ import com.plexon.shops.util.BoundedExecutor;
 import com.plexon.shops.util.MainThread;
 import org.bukkit.Bukkit;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.plugin.ServicePriority;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -44,6 +50,8 @@ public final class PlexonShops extends JavaPlugin {
     private VaultEconomyHook economy;
     private GuiManager guis;
     private PlexonShopsExpansion expansion;
+    private PlexonShopsAPI publicApi;
+    private CoreBridge coreBridge;
     private volatile boolean ready;
     private volatile boolean failed;
 
@@ -51,6 +59,9 @@ public final class PlexonShops extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
         saveResource("messages.yml", false);
+
+        coreBridge = CoreBridgeFactory.resolve(this);
+        coreBridge.registerStarting();
 
         try {
             PluginConfig initialConfig = PluginConfig.load(new File(getDataFolder(), "config.yml"));
@@ -70,7 +81,8 @@ public final class PlexonShops extends JavaPlugin {
                     getLogger()
             );
             ShopCache cache = new ShopCache();
-            shops = new ShopService(cache, repository, runtimeConfig::get, getLogger());
+            ShopEventPublisher eventPublisher = new ShopEventPublisher(this);
+            shops = new ShopService(cache, repository, runtimeConfig::get, getLogger(), eventPublisher);
             economy = new VaultEconomyHook(this, runtimeConfig::get);
             prompts = new ChatPromptService(this, runtimeConfig::get, messageService::get);
             teleports = new TeleportService(
@@ -96,6 +108,7 @@ public final class PlexonShops extends JavaPlugin {
             bootstrapStorage();
         } catch (RuntimeException error) {
             failed = true;
+            coreBridge.markFailed("PlexonShops initialization failed");
             getLogger().log(Level.SEVERE, "PlexonShops could not initialize", error);
             Bukkit.getPluginManager().disablePlugin(this);
         }
@@ -114,6 +127,10 @@ public final class PlexonShops extends JavaPlugin {
             expansion.unregister();
             expansion = null;
         }
+        if (publicApi != null) {
+            Bukkit.getServicesManager().unregister(PlexonShopsAPI.class, publicApi);
+            publicApi = null;
+        }
 
         int timeoutSeconds = runtimeConfig.get() == null
                 ? 10
@@ -127,6 +144,9 @@ public final class PlexonShops extends JavaPlugin {
         }
         if (worker != null && !worker.shutdown(Duration.ofSeconds(timeoutSeconds))) {
             getLogger().warning("PlexonShops background worker did not stop cleanly.");
+        }
+        if (coreBridge != null) {
+            coreBridge.unregister();
         }
     }
 
@@ -164,7 +184,10 @@ public final class PlexonShops extends JavaPlugin {
         }).thenAccept(bundle -> {
             runtimeConfig.set(bundle.config());
             messageService.set(bundle.messages());
-            Bukkit.getScheduler().runTask(this, economy::refresh);
+            Bukkit.getScheduler().runTask(this, () -> {
+                economy.refresh();
+                publishHealth();
+            });
         });
     }
 
@@ -174,6 +197,7 @@ public final class PlexonShops extends JavaPlugin {
                 .whenComplete((loaded, error) -> Bukkit.getScheduler().runTask(this, () -> {
                     if (error != null) {
                         failed = true;
+                        coreBridge.markFailed("Database bootstrap failed");
                         getLogger().log(Level.SEVERE, "PlexonShops database bootstrap failed", MainThread.unwrap(error));
                         Bukkit.getPluginManager().disablePlugin(this);
                         return;
@@ -184,10 +208,30 @@ public final class PlexonShops extends JavaPlugin {
 
     private void completeStartup(List<Shop> loaded) {
         shops.load(loaded);
-        ready = true;
+        registerPublicApi();
         registerPlaceholderExpansion();
+        ready = true;
+        publishHealth();
         long inactive = shops.inactiveCount();
-        getLogger().info("Loaded " + loaded.size() + " shops (" + inactive + " hidden by inactivity policy).");
+        getLogger().info("Loaded " + loaded.size() + " shops (" + inactive + " hidden by inactivity policy). Core mode: "
+                + coreBridge.mode() + ".");
+    }
+
+    private void registerPublicApi() {
+        publicApi = new DefaultPlexonShopsAPI(shops);
+        Bukkit.getServicesManager().register(PlexonShopsAPI.class, publicApi, this, ServicePriority.Normal);
+    }
+
+    private void publishHealth() {
+        if (!ready) {
+            return;
+        }
+        PluginConfig config = runtimeConfig.get();
+        if (config.teleport().economyEnabled() && !economy.available()) {
+            coreBridge.markDegraded("Shop engine ready; Vault economy provider unavailable");
+            return;
+        }
+        coreBridge.markReady("Shop engine, SQLite, public API and shop events ready");
     }
 
     private void registerCommands() {

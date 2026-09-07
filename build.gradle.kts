@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.plexon"
-version = "2.0.0"
+version = "2.1.0"
 
 val pluginVersion = version.toString()
 
@@ -17,6 +17,7 @@ java {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:26.2.build.121-stable")
+    compileOnly("com.zpkdxgames:PlexonCore:1.0.0")
     compileOnly("me.clip:placeholderapi:2.12.1")
     compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
         exclude(group = "org.bukkit", module = "bukkit")
@@ -108,7 +109,7 @@ val shadowJar = tasks.register<Jar>("shadowJar") {
 
 val verifyDistribution = tasks.register("verifyDistribution") {
     group = "verification"
-    description = "Checks that the installable JAR contains plugin metadata and embedded runtime drivers."
+    description = "Checks the installable JAR contract and verifies PlexonCore is not shaded."
     dependsOn(shadowJar)
     inputs.file(shadowJar.flatMap { it.archiveFile })
         .withPropertyName("distributionJar")
@@ -122,10 +123,18 @@ val verifyDistribution = tasks.register("verifyDistribution") {
             listOf(
                 "plugin.yml",
                 "com/plexon/shops/PlexonShops.class",
+                "com/plexon/shops/api/PlexonShopsAPI.class",
+                "com/plexon/shops/api/ShopView.class",
+                "com/plexon/shops/event/PlexonShopCreatedEvent.class",
+                "com/plexon/shops/event/PlexonShopVisitedEvent.class",
+                "com/plexon/shops/event/PlexonShopRatedEvent.class",
                 "com/zaxxer/hikari/HikariDataSource.class",
                 "org/sqlite/JDBC.class",
                 "META-INF/THIRD_PARTY_NOTICES.md"
             ).forEach { entry -> require(zip.getEntry(entry) != null) { "Missing JAR entry: $entry" } }
+            require(zip.entries().asSequence().none { it.name.startsWith("com/zpkdxgames/plexoncore/") }) {
+                "PlexonCore runtime classes must not be shaded into PlexonShops"
+            }
         }
     }
 }
