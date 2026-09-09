@@ -176,6 +176,27 @@ public final class SqliteShopRepository implements ShopRepository {
     }
 
     @Override
+    public CompletableFuture<Void> touchOwner(UUID ownerUuid, String ownerName, long timestampEpochSecond) {
+        return executor.run(() -> {
+            ensureInitialized();
+            try (Connection connection = connection();
+                 PreparedStatement statement = connection.prepareStatement("""
+                         UPDATE shops
+                         SET owner_name = ?, last_owner_seen = ?, updated_at = ?
+                         WHERE owner_uuid = ?
+                         """)) {
+                statement.setString(1, ownerName);
+                statement.setLong(2, timestampEpochSecond);
+                statement.setLong(3, timestampEpochSecond);
+                statement.setString(4, ownerUuid.toString());
+                statement.executeUpdate();
+            } catch (SQLException error) {
+                throw new StorageException("Could not update owner activity for " + ownerUuid, error);
+            }
+        });
+    }
+
+    @Override
     public CompletableFuture<Void> saveRating(UUID shopId, Rating rating) {
         return executor.run(() -> {
             ensureInitialized();
