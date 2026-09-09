@@ -70,4 +70,54 @@ class SqliteShopRepositoryTest {
             worker.shutdown(Duration.ofSeconds(5));
         }
     }
+
+    @Test
+    void touchesAllShopsForOwnerInOneRepositoryOperation() throws Exception {
+        BoundedExecutor worker = new BoundedExecutor("repository-touch-test", 1, 32);
+        SqliteShopRepository repository = new SqliteShopRepository(
+                temporaryDirectory.resolve("owner-touch.db").toFile(),
+                new PluginConfig.Database("owner-touch.db", 1, 5_000L),
+                worker,
+                Logger.getAnonymousLogger()
+        );
+        try {
+            repository.initialize().get(10, TimeUnit.SECONDS);
+            Shop first = ShopTest.shop();
+            Shop second = new Shop(
+                    UUID.randomUUID(),
+                    first.ownerUuid(),
+                    first.ownerName(),
+                    "Second Shop",
+                    first.location(),
+                    first.categories(),
+                    first.status(),
+                    first.ratings(),
+                    first.visitors(),
+                    first.displayIconData(),
+                    first.description(),
+                    first.labeledItems(),
+                    first.teleportFee(),
+                    first.lastOwnerSeenEpochSecond(),
+                    first.createdAtEpochSecond() + 1L,
+                    first.updatedAtEpochSecond()
+            );
+            repository.save(first).get(10, TimeUnit.SECONDS);
+            repository.save(second).get(10, TimeUnit.SECONDS);
+
+            repository.touchOwner(first.ownerUuid(), "UpdatedOwner", 777L).get(10, TimeUnit.SECONDS);
+
+            List<Shop> loaded = repository.loadAll().get(10, TimeUnit.SECONDS).stream()
+                    .filter(shop -> shop.ownerUuid().equals(first.ownerUuid()))
+                    .toList();
+            assertEquals(2, loaded.size());
+            for (Shop shop : loaded) {
+                assertEquals("UpdatedOwner", shop.ownerName());
+                assertEquals(777L, shop.lastOwnerSeenEpochSecond());
+                assertEquals(777L, shop.updatedAtEpochSecond());
+            }
+        } finally {
+            repository.close().get(10, TimeUnit.SECONDS);
+            worker.shutdown(Duration.ofSeconds(5));
+        }
+    }
 }
