@@ -158,6 +158,32 @@ public final class PlexonShops extends JavaPlugin {
         return failed;
     }
 
+    /** Low-overhead operational snapshot used by /pshops diagnostics. */
+    public DiagnosticsSnapshot diagnostics() {
+        if (!ready || shops == null || teleports == null || worker == null) {
+            throw new IllegalStateException("PlexonShops is not ready");
+        }
+        BoundedExecutor.ExecutorMetrics executor = worker.metrics();
+        return new DiagnosticsSnapshot(
+                getPluginMeta().getVersion(),
+                Bukkit.getVersion(),
+                System.getProperty("java.version", "unknown"),
+                shops.totalCount(),
+                shops.openCount(),
+                shops.inactiveCount(),
+                shops.directoryGeneration(),
+                shops.directoryCacheEntries(),
+                shops.ownerCreationsInFlight(),
+                teleports.pendingCount(),
+                teleports.coordinatorRunning(),
+                executor,
+                economy != null && economy.available(),
+                Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI"),
+                Bukkit.getPluginManager().isPluginEnabled("PlexonRanks"),
+                coreBridge == null ? "unavailable" : String.valueOf(coreBridge.mode())
+        );
+    }
+
     public CompletableFuture<Void> reloadRuntime() {
         PluginConfig active = runtimeConfig.get();
         return worker.supply(() -> {
@@ -264,6 +290,26 @@ public final class PlexonShops extends JavaPlugin {
                 new File(getDataFolder(), "messages.yml"),
                 getResource("messages.yml")
         );
+    }
+
+    public record DiagnosticsSnapshot(
+            String version,
+            String paperVersion,
+            String javaVersion,
+            int totalShops,
+            int openShops,
+            long inactiveShops,
+            long directoryGeneration,
+            int directoryCacheEntries,
+            int ownerCreationsInFlight,
+            int pendingTeleports,
+            boolean teleportCoordinatorRunning,
+            BoundedExecutor.ExecutorMetrics executor,
+            boolean vaultAvailable,
+            boolean placeholderApiAvailable,
+            boolean plexonRanksAvailable,
+            String coreMode
+    ) {
     }
 
     private record ReloadBundle(PluginConfig config, MessageService messages) {
