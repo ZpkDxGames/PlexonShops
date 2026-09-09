@@ -3,6 +3,7 @@ package com.plexon.shops.commands;
 import com.plexon.shops.PlexonShops;
 import com.plexon.shops.gui.GuiManager;
 import com.plexon.shops.messages.MessageService;
+import com.plexon.shops.services.ShopService;
 import com.plexon.shops.util.BoundedExecutor;
 import com.plexon.shops.util.MainThread;
 import org.bukkit.command.Command;
@@ -104,6 +105,7 @@ public final class PlexonShopsCommand implements TabExecutor {
         }
 
         PlexonShops.DiagnosticsSnapshot snapshot = plugin.diagnostics();
+        ShopService.VisitPersistenceMetrics visits = snapshot.visitPersistence();
         BoundedExecutor.ExecutorMetrics executor = snapshot.executor();
         sender.sendMessage("§6§lPlexonShops Diagnostics §8— §f" + snapshot.version());
         sender.sendMessage("§7Runtime: §f" + snapshot.paperVersion() + " §8| §7Java: §f" + snapshot.javaVersion());
@@ -111,11 +113,16 @@ public final class PlexonShopsCommand implements TabExecutor {
                 + " §8| §7Open: §f" + snapshot.openShops()
                 + " §8| §7Inactive: §f" + snapshot.inactiveShops());
         sender.sendMessage("§7Directory: §fgeneration " + snapshot.directoryGeneration()
-                + " §8| §7cached filters: §f" + snapshot.directoryCacheEntries());
+                + " §8| §7cached filters: §f" + snapshot.directoryCacheEntries()
+                + " §8| §7owner-order caches: §f" + snapshot.ownerOrderCacheEntries());
         sender.sendMessage("§7Teleports: §fpending " + snapshot.pendingTeleports()
                 + " §8| §7coordinator: §f" + (snapshot.teleportCoordinatorRunning() ? "running" : "idle"));
         sender.sendMessage("§7Mutations: §f" + snapshot.activeMutationChains()
                 + " active chains §8| §7owner creation guards: §f" + snapshot.ownerCreationsInFlight());
+        sender.sendMessage("§7Visits: §f" + visits.pendingShops() + " pending shops §8| §f"
+                + visits.pendingUniqueVisitors() + " pending unique §8| §f" + visits.activeFlushes() + " active flushes");
+        sender.sendMessage("§7Visit flushes: §f" + visits.completedFlushes() + " completed §8| §f"
+                + visits.failedFlushes() + " failed");
         sender.sendMessage("§7DB worker: §f" + executor.queueDepth() + '/' + executor.queueCapacity()
                 + " queued §8| §f" + executor.activeThreads() + " active §8| §f"
                 + executor.rejectedOperations() + " rejected");
