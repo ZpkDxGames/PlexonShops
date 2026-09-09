@@ -8,6 +8,7 @@ import com.plexon.shops.models.LabeledItem;
 import com.plexon.shops.models.Shop;
 import com.plexon.shops.models.ShopLocation;
 import com.plexon.shops.models.ShopStatus;
+import com.plexon.shops.models.Visitor;
 import com.plexon.shops.models.VisitorStats;
 import com.plexon.shops.storage.ShopRepository;
 import org.bukkit.entity.Player;
@@ -19,6 +20,7 @@ import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -51,7 +53,12 @@ public final class ShopService {
     private final Set<UUID> ownersCreating = new HashSet<>();
     private final Object directoryLock = new Object();
     private final Map<DirectoryFilter, DirectorySnapshot> directorySnapshots = new EnumMap<>(DirectoryFilter.class);
+    private final Object visitLock = new Object();
+    private final Map<UUID, VisitAccumulator> pendingVisitPersistence = new HashMap<>();
+    private final Map<UUID, CompletableFuture<Void>> activeVisitFlushes = new HashMap<>();
     private long directoryGeneration;
+    private long completedVisitFlushes;
+    private long failedVisitFlushes;
 
     public ShopService(
             ShopCache cache,
@@ -148,6 +155,10 @@ public final class ShopService {
         }
     }
 
+    public int ownerOrderCacheEntries() {
+        return cache.ownerOrderCacheEntries();
+    }
+
     public int activeMutationChains() {
         synchronized (mutationLock) {
             return mutationChains.size();
@@ -157,6 +168,21 @@ public final class ShopService {
     public int ownerCreationsInFlight() {
         synchronized (creationLock) {
             return ownersCreating.size();
+        }
+    }
+
+    public VisitPersistenceMetrics visitPersistenceMetrics() {
+        synchronized (visitLock) {
+            int pendingUniqueVisitors = pendingVisitPersistence.values().stream()
+                    .mapToInt(VisitAccumulator::uniqueVisitorCount)
+                    .sum();
+            return new VisitPersistenceMetrics(
+                    pendingVisitPersistence.size(),
+                    pendingUniqueVisitors,
+                    activeVisitFlushes.size(),
+                    completedVisitFlushes,
+                    failedVisitFlushes
+            );
         }
     }
 
@@ -305,24 +331,29 @@ public final class ShopService {
         }
     }
 
+    /**
+     * Applies the authoritative visit to memory and publishes the public event once, while persistence is
+     * coalesced independently per shop. Busy traffic therefore cannot enqueue one SQLite transaction per teleport.
+     */
     public CompletableFuture<Shop> recordVisit(UUID shopId, UUID playerUuid) {
-        boolean[] uniqueVisitor = {false};
-        CompletableFuture<Shop> result = mutate(
-                shopId,
-                shop -> {
-                    uniqueVisitor[0] = !shop.visitors().uniqueVisitors().containsKey(playerUuid);
-                    return shop.withVisit(playerUuid, now());
-                },
-                updated -> repository.recordVisit(updated, updated.visitors().uniqueVisitors().get(playerUuid))
-        ).thenApply(updated -> {
-            events.publishVisited(playerUuid, updated, uniqueVisitor[0]);
-            return updated;
-        });
-        result.exceptionally(error -> {
-            logger.log(Level.WARNING, "Could not persist visitor statistics for shop " + shopId, error);
-            return null;
-        });
-        return result;
+        synchronized (mutationLock) {
+            CompletableFuture<Void> previous = mutationChains.getOrDefault(shopId, CompletableFuture.completedFuture(null));
+            CompletableFuture<Shop> result = previous.thenApply(ignored -> {
+                Shop current = cache.find(shopId).orElse(null);
+                if (current == null) {
+                    throw new IllegalArgumentException("Shop does not exist");
+                }
+                boolean uniqueVisitor = !current.visitors().uniqueVisitors().containsKey(playerUuid);
+                Shop updated = current.withVisit(playerUuid, now());
+                cache.put(updated);
+                Visitor visitor = uniqueVisitor ? updated.visitors().uniqueVisitors().get(playerUuid) : null;
+                enqueueVisitPersistence(updated, visitor);
+                events.publishVisited(playerUuid, updated, uniqueVisitor);
+                return updated;
+            });
+            trackTail(shopId, result);
+            return result;
+        }
     }
 
     /**
@@ -355,6 +386,21 @@ public final class ShopService {
         }
     }
 
+    public CompletableFuture<Void> flushVisitAnalytics() {
+        List<CompletableFuture<Void>> active;
+        synchronized (visitLock) {
+            for (UUID shopId : List.copyOf(pendingVisitPersistence.keySet())) {
+                startVisitFlushLocked(shopId);
+            }
+            if (activeVisitFlushes.isEmpty()) {
+                return CompletableFuture.completedFuture(null);
+            }
+            active = List.copyOf(activeVisitFlushes.values());
+        }
+        return CompletableFuture.allOf(active.toArray(CompletableFuture[]::new))
+                .thenCompose(ignored -> flushVisitAnalytics());
+    }
+
     public CompletableFuture<Shop> delete(UUID shopId) {
         synchronized (mutationLock) {
             CompletableFuture<Void> previous = mutationChains.getOrDefault(shopId, CompletableFuture.completedFuture(null));
@@ -363,10 +409,18 @@ public final class ShopService {
                 if (existing == null) {
                     return CompletableFuture.failedFuture(new IllegalArgumentException("Shop does not exist"));
                 }
-                return repository.delete(shopId).thenApply(nothing -> {
-                    removeDirectoryShop(shopId);
-                    return existing;
-                });
+                return flushVisitAnalytics(shopId)
+                        .exceptionally(error -> {
+                            logger.log(Level.WARNING, "Discarding unflushed visit analytics before deleting shop " + shopId, error);
+                            clearPendingVisitAnalytics(shopId);
+                            return null;
+                        })
+                        .thenCompose(nothing -> repository.delete(shopId))
+                        .thenApply(nothing -> {
+                            clearPendingVisitAnalytics(shopId);
+                            removeDirectoryShop(shopId);
+                            return existing;
+                        });
             });
             trackTail(shopId, result);
             return result;
@@ -458,6 +512,78 @@ public final class ShopService {
         }
     }
 
+    private void enqueueVisitPersistence(Shop shop, Visitor uniqueVisitor) {
+        synchronized (visitLock) {
+            pendingVisitPersistence.computeIfAbsent(shop.id(), ignored -> new VisitAccumulator())
+                    .merge(shop, uniqueVisitor);
+            if (!activeVisitFlushes.containsKey(shop.id())) {
+                startVisitFlushLocked(shop.id());
+            }
+        }
+    }
+
+    private void startVisitFlushLocked(UUID shopId) {
+        if (activeVisitFlushes.containsKey(shopId)) {
+            return;
+        }
+        VisitAccumulator accumulator = pendingVisitPersistence.remove(shopId);
+        if (accumulator == null || accumulator.latestShop == null) {
+            return;
+        }
+        VisitBatch batch = accumulator.toBatch();
+        CompletableFuture<Void> flush = repository.recordVisits(batch.shop(), batch.uniqueVisitors());
+        activeVisitFlushes.put(shopId, flush);
+        flush.whenComplete((ignored, error) -> completeVisitFlush(shopId, batch, flush, error));
+    }
+
+    private void completeVisitFlush(
+            UUID shopId,
+            VisitBatch batch,
+            CompletableFuture<Void> flush,
+            Throwable error
+    ) {
+        boolean startNext = false;
+        synchronized (visitLock) {
+            if (activeVisitFlushes.get(shopId) != flush) {
+                return;
+            }
+            activeVisitFlushes.remove(shopId);
+            if (error == null) {
+                completedVisitFlushes++;
+                startNext = pendingVisitPersistence.containsKey(shopId);
+            } else {
+                failedVisitFlushes++;
+                pendingVisitPersistence.computeIfAbsent(shopId, ignored -> new VisitAccumulator()).merge(batch);
+            }
+            if (startNext) {
+                startVisitFlushLocked(shopId);
+            }
+        }
+        if (error != null) {
+            logger.log(Level.WARNING, "Could not flush visitor analytics for shop " + shopId, error);
+        }
+    }
+
+    private CompletableFuture<Void> flushVisitAnalytics(UUID shopId) {
+        CompletableFuture<Void> active;
+        synchronized (visitLock) {
+            if (!activeVisitFlushes.containsKey(shopId)) {
+                startVisitFlushLocked(shopId);
+            }
+            active = activeVisitFlushes.get(shopId);
+            if (active == null) {
+                return CompletableFuture.completedFuture(null);
+            }
+        }
+        return active.thenCompose(ignored -> flushVisitAnalytics(shopId));
+    }
+
+    private void clearPendingVisitAnalytics(UUID shopId) {
+        synchronized (visitLock) {
+            pendingVisitPersistence.remove(shopId);
+        }
+    }
+
     private void putDirectoryShop(Shop shop) {
         synchronized (directoryLock) {
             cache.put(shop);
@@ -512,12 +638,54 @@ public final class ShopService {
     public record DirectoryPage(int page, int pages, int total, List<Shop> items) {
     }
 
+    public record VisitPersistenceMetrics(
+            int pendingShops,
+            int pendingUniqueVisitors,
+            int activeFlushes,
+            long completedFlushes,
+            long failedFlushes
+    ) {
+    }
+
     private record DirectorySnapshot(
             long generation,
             int purgeDays,
             long expiresAtEpochSecond,
             List<UUID> shopIds
     ) {
+    }
+
+    private record VisitBatch(Shop shop, List<Visitor> uniqueVisitors) {
+    }
+
+    private static final class VisitAccumulator {
+        private Shop latestShop;
+        private final Map<UUID, Visitor> uniqueVisitors = new LinkedHashMap<>();
+
+        private void merge(Shop shop, Visitor uniqueVisitor) {
+            if (latestShop == null
+                    || shop.visitors().totalVisits() >= latestShop.visitors().totalVisits()) {
+                latestShop = shop;
+            }
+            if (uniqueVisitor != null) {
+                uniqueVisitors.putIfAbsent(uniqueVisitor.playerUuid(), uniqueVisitor);
+            }
+        }
+
+        private void merge(VisitBatch batch) {
+            merge(batch.shop(), null);
+            for (Visitor visitor : batch.uniqueVisitors()) {
+                uniqueVisitors.putIfAbsent(visitor.playerUuid(), visitor);
+            }
+        }
+
+        private int uniqueVisitorCount() {
+            return uniqueVisitors.size();
+        }
+
+        private VisitBatch toBatch() {
+            return new VisitBatch(latestShop, List.copyOf(uniqueVisitors.values()));
+        }
     }
 
     public record ShopCapacity(int owned, int totalLimit, int subShops, int subShopLimit) {
