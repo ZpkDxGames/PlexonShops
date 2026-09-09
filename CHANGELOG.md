@@ -2,6 +2,24 @@
 
 All notable changes to PlexonShops are documented here.
 
+## 2.2.0 - 2026-09-09
+
+- Reworked marketplace directory reads around generation-cached indexes so category/filter ordering is rebuilt only when directory-relevant shop state changes.
+- Added page-first directory retrieval so GUI page navigation materializes only the shops visible on the requested page instead of rebuilding the full marketplace list.
+- Added O(1) owner shop counts and open-shop counts, plus cached per-owner creation ordering for primary/sub-shop presentation and capacity checks.
+- Added a per-owner concurrent shop-creation guard to prevent double-click/concurrent creation races.
+- Reduced teleport hot-path work with O(1) pending warmup gates, rotation-only movement rejection, monotonic cooldown timing, cached warmup display state, and a single shared bossbar progress coordinator.
+- Decoupled successful teleport visit accounting from SQLite durability while preserving immediate in-memory visitor totals and exactly-once public visit-event publication.
+- Added per-shop coalesced visit persistence with batched unique-visitor inserts, monotonic visitor-total updates, delete-time flushing, retry retention, and shutdown flushing.
+- Replaced per-shop owner-login persistence fan-out with one indexed owner activity update while preserving ordered mutation chains.
+- Added bounded-worker observability for queue depth/capacity, active workers, submitted/completed operations, rejected work, P95 latency, and oldest queued-task age.
+- Added `/pshops diagnostics` for directory/cache state, pending teleports, mutation chains, creation guards, visit-flush pressure, worker pressure, and integration availability.
+- Added short-lived permission-limit caching to reduce repeated numbered permission scans in GUI/capacity paths while preserving rank-driven shop-limit semantics.
+- Added config-time sound-key validation/fallback so invalid Adventure keys do not repeatedly reach teleport runtime handling.
+- Expanded regression coverage for cache counters/order, bounded-worker pressure metrics, SQLite owner batching, and targeted persistence behavior.
+- Preserved existing shop UUIDs, owners, primary/sub-shop semantics, categories, ratings, visitor statistics, icons, descriptions, teleport fees, MiniMessage handling, PlaceholderAPI, Vault integration, PlexonCore API/events, and SQLite schema compatibility.
+- No database schema migration is required for 2.2.0.
+
 ## 2.1.0 - 2026-09-07
 
 - Added optional PlexonCore 1.x integration with isolated CORE/STANDALONE bridging and module lifecycle health.

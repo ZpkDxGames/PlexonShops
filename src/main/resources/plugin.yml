@@ -13,8 +13,8 @@ softdepend:
 
 commands:
   pshops:
-    description: Browse and manage Plexon player shops.
-    usage: /<command> [manage|reload]
+    description: Browse, manage, and diagnose Plexon player shops.
+    usage: /<command> [manage|diagnostics|reload]
     aliases: [pshop, playershops]
 
 permissions:

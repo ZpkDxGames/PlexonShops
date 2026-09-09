@@ -1,7 +1,7 @@
 package com.plexon.shops.storage;
 
-import com.plexon.shops.models.Shop;
 import com.plexon.shops.models.Rating;
+import com.plexon.shops.models.Shop;
 import com.plexon.shops.models.Visitor;
 
 import java.util.List;
@@ -18,9 +18,19 @@ public interface ShopRepository {
 
     CompletableFuture<Void> saveCore(Shop shop);
 
+    /** Updates activity metadata for all shops owned by one player in a single storage operation. */
+    CompletableFuture<Void> touchOwner(UUID ownerUuid, String ownerName, long timestampEpochSecond);
+
     CompletableFuture<Void> saveRating(UUID shopId, Rating rating);
 
-    CompletableFuture<Void> recordVisit(Shop shop, Visitor visitor);
+    /**
+     * Persists the latest total visit count and any newly observed unique visitors in one transaction.
+     */
+    CompletableFuture<Void> recordVisits(Shop shop, List<Visitor> newUniqueVisitors);
+
+    default CompletableFuture<Void> recordVisit(Shop shop, Visitor visitor) {
+        return recordVisits(shop, List.of(visitor));
+    }
 
     CompletableFuture<Void> syncLabeledItems(Shop shop);
 

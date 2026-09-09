@@ -3,6 +3,8 @@ package com.plexon.shops.commands;
 import com.plexon.shops.PlexonShops;
 import com.plexon.shops.gui.GuiManager;
 import com.plexon.shops.messages.MessageService;
+import com.plexon.shops.services.ShopService;
+import com.plexon.shops.util.BoundedExecutor;
 import com.plexon.shops.util.MainThread;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
@@ -15,7 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.function.Supplier;
 
-/** Small command surface that routes player work into GUIs. */
+/** Small command surface that routes player work into GUIs and admin diagnostics. */
 public final class PlexonShopsCommand implements TabExecutor {
     private final PlexonShops plugin;
     private final Supplier<GuiManager> guis;
@@ -40,6 +42,9 @@ public final class PlexonShopsCommand implements TabExecutor {
     ) {
         if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
             return reload(sender);
+        }
+        if (args.length > 0 && args[0].equalsIgnoreCase("diagnostics")) {
+            return diagnostics(sender);
         }
         if (!(sender instanceof Player player)) {
             messages.get().send(sender, "players-only");
@@ -66,7 +71,8 @@ public final class PlexonShopsCommand implements TabExecutor {
             return true;
         }
         player.sendMessage(messages.get().prefix().append(messages.get().raw(
-                "<gray>Use <white>/pshops</white>, <white>/pshops manage</white>, or <white>/pshops reload</white>.</gray>")));
+                "<gray>Use <white>/pshops</white>, <white>/pshops manage</white>, "
+                        + "<white>/pshops diagnostics</white>, or <white>/pshops reload</white>.</gray>")));
         return true;
     }
 
@@ -88,6 +94,57 @@ public final class PlexonShopsCommand implements TabExecutor {
         return true;
     }
 
+    private boolean diagnostics(CommandSender sender) {
+        if (!sender.hasPermission("plexonshops.admin")) {
+            messages.get().send(sender, "no-permission");
+            return true;
+        }
+        if (!plugin.isReady()) {
+            messages.get().send(sender, plugin.hasFailed() ? "disabled" : "loading");
+            return true;
+        }
+
+        PlexonShops.DiagnosticsSnapshot snapshot = plugin.diagnostics();
+        ShopService.VisitPersistenceMetrics visits = snapshot.visitPersistence();
+        BoundedExecutor.ExecutorMetrics executor = snapshot.executor();
+        sender.sendMessage("§6§lPlexonShops Diagnostics §8— §f" + snapshot.version());
+        sender.sendMessage("§7Runtime: §f" + snapshot.paperVersion() + " §8| §7Java: §f" + snapshot.javaVersion());
+        sender.sendMessage("§7Shops: §f" + snapshot.totalShops()
+                + " §8| §7Open: §f" + snapshot.openShops()
+                + " §8| §7Inactive: §f" + snapshot.inactiveShops());
+        sender.sendMessage("§7Directory: §fgeneration " + snapshot.directoryGeneration()
+                + " §8| §7cached filters: §f" + snapshot.directoryCacheEntries()
+                + " §8| §7owner-order caches: §f" + snapshot.ownerOrderCacheEntries());
+        sender.sendMessage("§7Teleports: §fpending " + snapshot.pendingTeleports()
+                + " §8| §7coordinator: §f" + (snapshot.teleportCoordinatorRunning() ? "running" : "idle"));
+        sender.sendMessage("§7Mutations: §f" + snapshot.activeMutationChains()
+                + " active chains §8| §7owner creation guards: §f" + snapshot.ownerCreationsInFlight());
+        sender.sendMessage("§7Visits: §f" + visits.pendingShops() + " pending shops §8| §f"
+                + visits.pendingUniqueVisitors() + " pending unique §8| §f" + visits.activeFlushes() + " active flushes");
+        sender.sendMessage("§7Visit flushes: §f" + visits.completedFlushes() + " completed §8| §f"
+                + visits.failedFlushes() + " failed");
+        sender.sendMessage("§7DB worker: §f" + executor.queueDepth() + '/' + executor.queueCapacity()
+                + " queued §8| §f" + executor.activeThreads() + " active §8| §f"
+                + executor.rejectedOperations() + " rejected");
+        sender.sendMessage(String.format(
+                Locale.ROOT,
+                "§7DB tasks: §f%d submitted §8| §f%d completed §8| §7P95: §f%.2f ms §8| §7oldest queued: §f%d ms",
+                executor.submittedOperations(),
+                executor.completedOperations(),
+                executor.p95TaskLatencyMillis(),
+                executor.oldestQueuedTaskAgeMillis()
+        ));
+        sender.sendMessage("§7Integrations: §fVault=" + status(snapshot.vaultAvailable())
+                + " §8| §fPAPI=" + status(snapshot.placeholderApiAvailable())
+                + " §8| §fPlexonRanks=" + status(snapshot.plexonRanksAvailable())
+                + " §8| §fCore=" + snapshot.coreMode());
+        return true;
+    }
+
+    private String status(boolean available) {
+        return available ? "ready" : "unavailable";
+    }
+
     @Override
     public @Nullable List<String> onTabComplete(
             @NotNull CommandSender sender,
@@ -99,11 +156,12 @@ public final class PlexonShopsCommand implements TabExecutor {
             return List.of();
         }
         String prefix = args[0].toLowerCase(Locale.ROOT);
-        return List.of("manage", "reload").stream()
+        return List.of("manage", "diagnostics", "reload").stream()
                 .filter(option -> option.startsWith(prefix))
                 .filter(option -> !option.equals("reload")
                         || sender.hasPermission("plexonshops.admin")
                         || sender.hasPermission("plexonshops.reload"))
+                .filter(option -> !option.equals("diagnostics") || sender.hasPermission("plexonshops.admin"))
                 .toList();
     }
 }

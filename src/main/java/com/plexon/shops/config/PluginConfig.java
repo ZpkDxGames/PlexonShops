@@ -2,6 +2,7 @@ package com.plexon.shops.config;
 
 import com.plexon.shops.models.Category;
 import com.plexon.shops.models.ShopStatus;
+import net.kyori.adventure.key.Key;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -246,6 +247,12 @@ public record PluginConfig(
     }
 
     private static String normalizedKey(String value, String fallback) {
-        return value == null || value.isBlank() ? fallback : value.strip().toLowerCase(Locale.ROOT);
+        String candidate = value == null || value.isBlank() ? fallback : value.strip().toLowerCase(Locale.ROOT);
+        try {
+            Key.key(candidate);
+            return candidate;
+        } catch (IllegalArgumentException ignored) {
+            return fallback;
+        }
     }
 }
