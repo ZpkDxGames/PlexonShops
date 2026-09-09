@@ -135,6 +135,13 @@ public final class PlexonShops extends JavaPlugin {
         int timeoutSeconds = runtimeConfig.get() == null
                 ? 10
                 : runtimeConfig.get().worker().shutdownTimeoutSeconds();
+        if (shops != null && worker != null) {
+            try {
+                shops.flushVisitAnalytics().get(timeoutSeconds, TimeUnit.SECONDS);
+            } catch (Exception error) {
+                getLogger().log(Level.WARNING, "Could not flush all visit analytics during shutdown", MainThread.unwrap(error));
+            }
+        }
         if (repository != null && worker != null) {
             try {
                 repository.close().get(timeoutSeconds, TimeUnit.SECONDS);
@@ -164,6 +171,7 @@ public final class PlexonShops extends JavaPlugin {
             throw new IllegalStateException("PlexonShops is not ready");
         }
         BoundedExecutor.ExecutorMetrics executor = worker.metrics();
+        ShopService.VisitPersistenceMetrics visits = shops.visitPersistenceMetrics();
         return new DiagnosticsSnapshot(
                 getPluginMeta().getVersion(),
                 Bukkit.getVersion(),
@@ -173,10 +181,12 @@ public final class PlexonShops extends JavaPlugin {
                 shops.inactiveCount(),
                 shops.directoryGeneration(),
                 shops.directoryCacheEntries(),
+                shops.ownerOrderCacheEntries(),
                 shops.activeMutationChains(),
                 shops.ownerCreationsInFlight(),
                 teleports.pendingCount(),
                 teleports.coordinatorRunning(),
+                visits,
                 executor,
                 economy != null && economy.available(),
                 Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI"),
@@ -302,10 +312,12 @@ public final class PlexonShops extends JavaPlugin {
             long inactiveShops,
             long directoryGeneration,
             int directoryCacheEntries,
+            int ownerOrderCacheEntries,
             int activeMutationChains,
             int ownerCreationsInFlight,
             int pendingTeleports,
             boolean teleportCoordinatorRunning,
+            ShopService.VisitPersistenceMetrics visitPersistence,
             BoundedExecutor.ExecutorMetrics executor,
             boolean vaultAvailable,
             boolean placeholderApiAvailable,
