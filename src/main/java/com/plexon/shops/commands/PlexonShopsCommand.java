@@ -114,7 +114,8 @@ public final class PlexonShopsCommand implements TabExecutor {
                 + " §8| §7cached filters: §f" + snapshot.directoryCacheEntries());
         sender.sendMessage("§7Teleports: §fpending " + snapshot.pendingTeleports()
                 + " §8| §7coordinator: §f" + (snapshot.teleportCoordinatorRunning() ? "running" : "idle"));
-        sender.sendMessage("§7Owner creation guards: §f" + snapshot.ownerCreationsInFlight());
+        sender.sendMessage("§7Mutations: §f" + snapshot.activeMutationChains()
+                + " active chains §8| §7owner creation guards: §f" + snapshot.ownerCreationsInFlight());
         sender.sendMessage("§7DB worker: §f" + executor.queueDepth() + '/' + executor.queueCapacity()
                 + " queued §8| §f" + executor.activeThreads() + " active §8| §f"
                 + executor.rejectedOperations() + " rejected");
