@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -46,6 +47,8 @@ public final class ShopService {
     private final ShopEventPublisher events;
     private final Object mutationLock = new Object();
     private final Map<UUID, CompletableFuture<Void>> mutationChains = new HashMap<>();
+    private final Object creationLock = new Object();
+    private final Set<UUID> ownersCreating = new HashSet<>();
     private final Object directoryLock = new Object();
     private final Map<DirectoryFilter, DirectorySnapshot> directorySnapshots = new EnumMap<>(DirectoryFilter.class);
     private long directoryGeneration;
@@ -77,6 +80,10 @@ public final class ShopService {
 
     public List<Shop> ownedBy(UUID ownerUuid) {
         return cache.ownedBy(ownerUuid);
+    }
+
+    public int ownedCount(UUID ownerUuid) {
+        return cache.ownedCount(ownerUuid);
     }
 
     /**
@@ -141,6 +148,12 @@ public final class ShopService {
         }
     }
 
+    public int ownerCreationsInFlight() {
+        synchronized (creationLock) {
+            return ownersCreating.size();
+        }
+    }
+
     public int shopLimit(Player player) {
         PluginConfig.Limits limits = config.get().limits();
         if (player.hasPermission("plexonshops.subshops.unlimited")
@@ -189,11 +202,25 @@ public final class ShopService {
                 now,
                 now
         );
-        return repository.save(shop).thenApply(ignored -> {
-            putDirectoryShop(shop);
-            events.publishCreated(ownerUuid, shop);
-            return shop;
-        });
+
+        synchronized (creationLock) {
+            if (!ownersCreating.add(ownerUuid)) {
+                return CompletableFuture.failedFuture(new IllegalStateException("Shop creation already in progress"));
+            }
+        }
+
+        CompletableFuture<Shop> result;
+        try {
+            result = repository.save(shop).thenApply(ignored -> {
+                putDirectoryShop(shop);
+                events.publishCreated(ownerUuid, shop);
+                return shop;
+            });
+        } catch (RuntimeException error) {
+            releaseOwnerCreation(ownerUuid);
+            return CompletableFuture.failedFuture(error);
+        }
+        return result.whenComplete((ignored, error) -> releaseOwnerCreation(ownerUuid));
     }
 
     public CompletableFuture<Shop> setStatus(UUID shopId, ShopStatus status) {
@@ -408,6 +435,12 @@ public final class ShopService {
     private void invalidateDirectoryLocked() {
         directoryGeneration++;
         directorySnapshots.clear();
+    }
+
+    private void releaseOwnerCreation(UUID ownerUuid) {
+        synchronized (creationLock) {
+            ownersCreating.remove(ownerUuid);
+        }
     }
 
     private void trackTail(UUID shopId, CompletableFuture<Shop> result) {
