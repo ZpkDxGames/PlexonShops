@@ -14,7 +14,9 @@ import org.bukkit.entity.Player;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,7 @@ public final class ShopService {
             .thenComparing(Comparator.comparingDouble(Shop::averageRating).reversed())
             .thenComparing(Shop::name, String.CASE_INSENSITIVE_ORDER)
             .thenComparing(Shop::id);
+    private static final long DIRECTORY_SNAPSHOT_TTL_SECONDS = 60L;
 
     private final ShopCache cache;
     private final ShopRepository repository;
@@ -43,6 +46,9 @@ public final class ShopService {
     private final ShopEventPublisher events;
     private final Object mutationLock = new Object();
     private final Map<UUID, CompletableFuture<Void>> mutationChains = new HashMap<>();
+    private final Object directoryLock = new Object();
+    private final Map<DirectoryFilter, DirectorySnapshot> directorySnapshots = new EnumMap<>(DirectoryFilter.class);
+    private long directoryGeneration;
 
     public ShopService(
             ShopCache cache,
@@ -59,7 +65,10 @@ public final class ShopService {
     }
 
     public void load(List<Shop> shops) {
-        cache.replaceAll(shops);
+        synchronized (directoryLock) {
+            cache.replaceAll(shops);
+            invalidateDirectoryLocked();
+        }
     }
 
     public Optional<Shop> find(UUID shopId) {
@@ -70,16 +79,37 @@ public final class ShopService {
         return cache.ownedBy(ownerUuid);
     }
 
+    /**
+     * Compatibility directory view. GUI callers should prefer {@link #directoryPage(DirectoryFilter, int, int)}
+     * so page navigation never rebuilds or materializes the entire marketplace.
+     */
     public List<Shop> directory(DirectoryFilter filter) {
-        int purgeDays = config.get().inactivityPurgeDays();
-        long cutoff = purgeDays <= 0
-                ? 0L
-                : Instant.now().minus(purgeDays, ChronoUnit.DAYS).getEpochSecond();
-        return cache.all().stream()
-                .filter(shop -> shop.isRecentlyActive(cutoff))
-                .filter(filter::matches)
-                .sorted(DIRECTORY_ORDER)
-                .toList();
+        synchronized (directoryLock) {
+            DirectorySnapshot snapshot = directorySnapshotLocked(filter);
+            List<Shop> result = new ArrayList<>(snapshot.shopIds().size());
+            for (UUID shopId : snapshot.shopIds()) {
+                cache.find(shopId).ifPresent(result::add);
+            }
+            return List.copyOf(result);
+        }
+    }
+
+    /** Returns only the directory page that a GUI will render. */
+    public DirectoryPage directoryPage(DirectoryFilter filter, int requestedPage, int pageSize) {
+        int safePageSize = Math.max(1, pageSize);
+        synchronized (directoryLock) {
+            DirectorySnapshot snapshot = directorySnapshotLocked(filter);
+            int total = snapshot.shopIds().size();
+            int pages = Math.max(1, (total + safePageSize - 1) / safePageSize);
+            int page = Math.clamp(requestedPage, 0, pages - 1);
+            int from = Math.min(total, page * safePageSize);
+            int to = Math.min(total, from + safePageSize);
+            List<Shop> visible = new ArrayList<>(to - from);
+            for (int index = from; index < to; index++) {
+                cache.find(snapshot.shopIds().get(index)).ifPresent(visible::add);
+            }
+            return new DirectoryPage(page, pages, total, List.copyOf(visible));
+        }
     }
 
     public long inactiveCount() {
@@ -88,7 +118,7 @@ public final class ShopService {
             return 0L;
         }
         long cutoff = Instant.now().minus(purgeDays, ChronoUnit.DAYS).getEpochSecond();
-        return cache.all().stream().filter(shop -> !shop.isRecentlyActive(cutoff)).count();
+        return cache.count(shop -> !shop.isRecentlyActive(cutoff));
     }
 
     public int totalCount() {
@@ -96,7 +126,19 @@ public final class ShopService {
     }
 
     public int openCount() {
-        return (int) cache.all().stream().filter(shop -> shop.status() == ShopStatus.OPEN).count();
+        return cache.openCount();
+    }
+
+    public long directoryGeneration() {
+        synchronized (directoryLock) {
+            return directoryGeneration;
+        }
+    }
+
+    public int directoryCacheEntries() {
+        synchronized (directoryLock) {
+            return directorySnapshots.size();
+        }
     }
 
     public int shopLimit(Player player) {
@@ -119,7 +161,7 @@ public final class ShopService {
     }
 
     public ShopCapacity capacity(Player player) {
-        int owned = ownedBy(player.getUniqueId()).size();
+        int owned = cache.ownedCount(player.getUniqueId());
         int totalLimit = shopLimit(player);
         int subShops = Math.max(0, owned - 1);
         int subShopLimit = totalLimit == Integer.MAX_VALUE ? Integer.MAX_VALUE : Math.max(0, totalLimit - 1);
@@ -148,7 +190,7 @@ public final class ShopService {
                 now
         );
         return repository.save(shop).thenApply(ignored -> {
-            cache.put(shop);
+            putDirectoryShop(shop);
             events.publishCreated(ownerUuid, shop);
             return shop;
         });
@@ -220,7 +262,7 @@ public final class ShopService {
                 }
                 Shop updated = current.withRating(playerUuid, stars, now());
                 return repository.saveRating(updated.id(), updated.ratings().get(playerUuid)).thenApply(nothing -> {
-                    cache.put(updated);
+                    putDirectoryShop(updated);
                     events.publishRated(playerUuid, updated, previousRating);
                     return updated;
                 });
@@ -268,7 +310,7 @@ public final class ShopService {
                     return CompletableFuture.failedFuture(new IllegalArgumentException("Shop does not exist"));
                 }
                 return repository.delete(shopId).thenApply(nothing -> {
-                    cache.remove(shopId);
+                    removeDirectoryShop(shopId);
                     return existing;
                 });
             });
@@ -300,13 +342,72 @@ public final class ShopService {
                     return CompletableFuture.failedFuture(error);
                 }
                 return persistence.apply(updated).thenApply(nothing -> {
-                    cache.put(updated);
+                    if (directoryRelevantChanged(current, updated)) {
+                        putDirectoryShop(updated);
+                    } else {
+                        cache.put(updated);
+                    }
                     return updated;
                 });
             });
             trackTail(shopId, result);
             return result;
         }
+    }
+
+    private DirectorySnapshot directorySnapshotLocked(DirectoryFilter filter) {
+        PluginConfig settings = config.get();
+        int purgeDays = settings.inactivityPurgeDays();
+        long now = Instant.now().getEpochSecond();
+        DirectorySnapshot cached = directorySnapshots.get(filter);
+        if (cached != null
+                && cached.generation() == directoryGeneration
+                && cached.purgeDays() == purgeDays
+                && now < cached.expiresAtEpochSecond()) {
+            return cached;
+        }
+
+        long cutoff = purgeDays <= 0
+                ? 0L
+                : Instant.ofEpochSecond(now).minus(purgeDays, ChronoUnit.DAYS).getEpochSecond();
+        List<UUID> sortedIds = cache.unsortedSnapshot().stream()
+                .filter(shop -> shop.isRecentlyActive(cutoff))
+                .filter(filter::matches)
+                .sorted(DIRECTORY_ORDER)
+                .map(Shop::id)
+                .toList();
+        long expiresAt = purgeDays <= 0 ? Long.MAX_VALUE : now + DIRECTORY_SNAPSHOT_TTL_SECONDS;
+        DirectorySnapshot rebuilt = new DirectorySnapshot(directoryGeneration, purgeDays, expiresAt, sortedIds);
+        directorySnapshots.put(filter, rebuilt);
+        return rebuilt;
+    }
+
+    private boolean directoryRelevantChanged(Shop previous, Shop updated) {
+        return previous.status() != updated.status()
+                || !previous.name().equals(updated.name())
+                || !previous.categories().equals(updated.categories())
+                || Double.compare(previous.averageRating(), updated.averageRating()) != 0
+                || previous.labeledItems().isEmpty() != updated.labeledItems().isEmpty()
+                || previous.lastOwnerSeenEpochSecond() != updated.lastOwnerSeenEpochSecond();
+    }
+
+    private void putDirectoryShop(Shop shop) {
+        synchronized (directoryLock) {
+            cache.put(shop);
+            invalidateDirectoryLocked();
+        }
+    }
+
+    private void removeDirectoryShop(UUID shopId) {
+        synchronized (directoryLock) {
+            cache.remove(shopId);
+            invalidateDirectoryLocked();
+        }
+    }
+
+    private void invalidateDirectoryLocked() {
+        directoryGeneration++;
+        directorySnapshots.clear();
     }
 
     private void trackTail(UUID shopId, CompletableFuture<Shop> result) {
@@ -323,6 +424,17 @@ public final class ShopService {
 
     private long now() {
         return Instant.now().getEpochSecond();
+    }
+
+    public record DirectoryPage(int page, int pages, int total, List<Shop> items) {
+    }
+
+    private record DirectorySnapshot(
+            long generation,
+            int purgeDays,
+            long expiresAtEpochSecond,
+            List<UUID> shopIds
+    ) {
     }
 
     public record ShopCapacity(int owned, int totalLimit, int subShops, int subShopLimit) {
