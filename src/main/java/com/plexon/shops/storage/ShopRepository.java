@@ -18,6 +18,9 @@ public interface ShopRepository {
 
     CompletableFuture<Void> saveCore(Shop shop);
 
+    /** Updates activity metadata for all shops owned by one player in a single storage operation. */
+    CompletableFuture<Void> touchOwner(UUID ownerUuid, String ownerName, long timestampEpochSecond);
+
     CompletableFuture<Void> saveRating(UUID shopId, Rating rating);
 
     CompletableFuture<Void> recordVisit(Shop shop, Visitor visitor);
