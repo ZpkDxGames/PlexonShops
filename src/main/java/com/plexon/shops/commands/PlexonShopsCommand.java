@@ -2,8 +2,10 @@ package com.plexon.shops.commands;
 
 import com.plexon.shops.PlexonShops;
 import com.plexon.shops.gui.GuiManager;
+import com.plexon.shops.integration.core.runtime.CoreRuntimeShopsBridge;
 import com.plexon.shops.messages.MessageService;
 import com.plexon.shops.services.ShopService;
+import com.plexon.shops.services.TeleportService;
 import com.plexon.shops.util.BoundedExecutor;
 import com.plexon.shops.util.MainThread;
 import org.bukkit.command.Command;
@@ -107,6 +109,8 @@ public final class PlexonShopsCommand implements TabExecutor {
         PlexonShops.DiagnosticsSnapshot snapshot = plugin.diagnostics();
         ShopService.VisitPersistenceMetrics visits = snapshot.visitPersistence();
         BoundedExecutor.ExecutorMetrics executor = snapshot.executor();
+        TeleportService.TeleportMetrics teleport = snapshot.teleportMetrics();
+        CoreRuntimeShopsBridge.Snapshot ownership = snapshot.runtimeOwnership();
         sender.sendMessage("§6§lPlexonShops Diagnostics §8— §f" + snapshot.version());
         sender.sendMessage("§7Runtime: §f" + snapshot.paperVersion() + " §8| §7Java: §f" + snapshot.javaVersion());
         sender.sendMessage("§7Shops: §f" + snapshot.totalShops()
@@ -116,7 +120,23 @@ public final class PlexonShopsCommand implements TabExecutor {
                 + " §8| §7cached filters: §f" + snapshot.directoryCacheEntries()
                 + " §8| §7owner-order caches: §f" + snapshot.ownerOrderCacheEntries());
         sender.sendMessage("§7Teleports: §fpending " + snapshot.pendingTeleports()
+                + " §8| §7cooldowns: §f" + snapshot.cooldowns()
                 + " §8| §7coordinator: §f" + (snapshot.teleportCoordinatorRunning() ? "running" : "idle"));
+        sender.sendMessage("§7Movement: §f" + teleport.movementEventsReceived() + " received §8| §f"
+                + teleport.movementFastRejects() + " fast rejects §8| §f"
+                + teleport.movementCancellations() + " cancellations");
+        sender.sendMessage("§7Damage: §f" + teleport.damageEventsReceived() + " received §8| §f"
+                + teleport.damageFastRejects() + " fast rejects §8| §f"
+                + teleport.damageCancellations() + " cancellations §8| §7quit cancels: §f"
+                + teleport.quitCancellations());
+        sender.sendMessage("§7Player event ownership: §fmove=" + ownership.movement()
+                + " §8| §fdamage=" + ownership.damage()
+                + " §8| §fquit=" + ownership.quit()
+                + " §8| §fjoin=" + ownership.join());
+        sender.sendMessage("§7Local-only: §fGUI=" + ownership.gui()
+                + " §8| §fchat=" + ownership.chatPrompt()
+                + " §8| §7epoch: §f" + ownership.epoch()
+                + " §8| §7fallback families: §f" + ownership.fallbackFamilies());
         sender.sendMessage("§7Mutations: §f" + snapshot.activeMutationChains()
                 + " active chains §8| §7owner creation guards: §f" + snapshot.ownerCreationsInFlight());
         sender.sendMessage("§7Visits: §f" + visits.pendingShops() + " pending shops §8| §f"
@@ -134,10 +154,16 @@ public final class PlexonShopsCommand implements TabExecutor {
                 executor.p95TaskLatencyMillis(),
                 executor.oldestQueuedTaskAgeMillis()
         ));
+        sender.sendMessage("§7Core: §fplugin " + snapshot.corePluginVersion()
+                + " §8| §7API: §f" + snapshot.coreApiVersion()
+                + " §8| §7mode: §f" + snapshot.coreMode()
+                + " §8| §7module: §f" + snapshot.coreRegistrationState());
+        sender.sendMessage("§7Core player watch: §f" + (ownership.playerWatchAvailable() ? "available" : "unavailable")
+                + " §8| §7requested: §f" + ownership.requestedMode()
+                + (ownership.degraded() ? " §8| §cDEGRADED" : ""));
         sender.sendMessage("§7Integrations: §fVault=" + status(snapshot.vaultAvailable())
                 + " §8| §fPAPI=" + status(snapshot.placeholderApiAvailable())
-                + " §8| §fPlexonRanks=" + status(snapshot.plexonRanksAvailable())
-                + " §8| §fCore=" + snapshot.coreMode());
+                + " §8| §fPlexonRanks=" + status(snapshot.plexonRanksAvailable()));
         return true;
     }
 
