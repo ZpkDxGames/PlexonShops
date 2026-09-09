@@ -148,6 +148,12 @@ public final class ShopService {
         }
     }
 
+    public int activeMutationChains() {
+        synchronized (mutationLock) {
+            return mutationChains.size();
+        }
+    }
+
     public int ownerCreationsInFlight() {
         synchronized (creationLock) {
             return ownersCreating.size();
@@ -319,9 +325,30 @@ public final class ShopService {
         return result;
     }
 
+    /**
+     * Coalesces owner activity into one indexed SQL update while preserving per-shop mutation order.
+     */
     public void touchOwner(UUID ownerUuid, String ownerName) {
-        for (Shop shop : ownedBy(ownerUuid)) {
-            mutateCore(shop.id(), current -> current.withOwnerSeen(ownerName, now())).exceptionally(error -> {
+        List<Shop> owned = cache.ownedBy(ownerUuid);
+        if (owned.isEmpty()) {
+            return;
+        }
+        long timestamp = now();
+        List<UUID> shopIds = owned.stream().map(Shop::id).toList();
+
+        synchronized (mutationLock) {
+            CompletableFuture<?>[] predecessors = shopIds.stream()
+                    .map(shopId -> mutationChains.getOrDefault(shopId, CompletableFuture.completedFuture(null)))
+                    .toArray(CompletableFuture[]::new);
+            CompletableFuture<Void> batch = CompletableFuture.allOf(predecessors)
+                    .thenCompose(ignored -> repository.touchOwner(ownerUuid, ownerName, timestamp))
+                    .thenRun(() -> applyOwnerTouch(ownerUuid, ownerName, timestamp));
+            CompletableFuture<Void> tail = batch.handle((ignored, error) -> null);
+            for (UUID shopId : shopIds) {
+                mutationChains.put(shopId, tail);
+            }
+            tail.whenComplete((ignored, error) -> clearSharedTail(shopIds, tail));
+            batch.exceptionally(error -> {
                 logger.log(Level.WARNING, "Could not update shop owner activity for " + ownerUuid, error);
                 return null;
             });
@@ -418,6 +445,19 @@ public final class ShopService {
                 || previous.lastOwnerSeenEpochSecond() != updated.lastOwnerSeenEpochSecond();
     }
 
+    private void applyOwnerTouch(UUID ownerUuid, String ownerName, long timestamp) {
+        synchronized (directoryLock) {
+            List<Shop> currentOwned = cache.ownedBy(ownerUuid);
+            if (currentOwned.isEmpty()) {
+                return;
+            }
+            for (Shop current : currentOwned) {
+                cache.put(current.withOwnerSeen(ownerName, timestamp));
+            }
+            invalidateDirectoryLocked();
+        }
+    }
+
     private void putDirectoryShop(Shop shop) {
         synchronized (directoryLock) {
             cache.put(shop);
@@ -440,6 +480,16 @@ public final class ShopService {
     private void releaseOwnerCreation(UUID ownerUuid) {
         synchronized (creationLock) {
             ownersCreating.remove(ownerUuid);
+        }
+    }
+
+    private void clearSharedTail(List<UUID> shopIds, CompletableFuture<Void> tail) {
+        synchronized (mutationLock) {
+            for (UUID shopId : shopIds) {
+                if (mutationChains.get(shopId) == tail) {
+                    mutationChains.remove(shopId);
+                }
+            }
         }
     }
 
