@@ -51,10 +51,12 @@ jobs:
         run: ./gradlew --no-daemon clean test check javadoc shadowJar verifyDistribution --stacktrace
 
       - name: Verify release contract
+        id: release_contract
         shell: bash
         run: |
           set -euo pipefail
-          jar_path='build/libs/PlexonShops-2.1.0.jar'
+          VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
+          jar_path="build/libs/PlexonShops-${VERSION}.jar"
           test -s "${jar_path}"
           jar tf "${jar_path}" > build/jar-contents.txt
           grep -qx 'plugin.yml' build/jar-contents.txt
@@ -67,12 +69,13 @@ jobs:
             exit 1
           fi
           unzip -p "${jar_path}" plugin.yml | sed -n 's/^version:[[:space:]]*//p' \
-            | head -n 1 | tr -d " '\"\r" | grep -qx '2.1.0'
+            | head -n 1 | tr -d " '\"\r" | grep -qx "${VERSION}"
           javap -verbose -classpath "${jar_path}" com.plexon.shops.PlexonShops \
             | grep -q 'major version: 69'
           mkdir -p build/release
           sha256sum "${jar_path}" > build/release/SHA256SUMS.txt
           sha256sum --check build/release/SHA256SUMS.txt
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Check whitespace
         run: git diff --check
@@ -80,8 +83,8 @@ jobs:
       - name: Upload verified artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PlexonShops-2.1.0-${{ github.sha }}
+          name: PlexonShops-${{ steps.release_contract.outputs.version }}-${{ github.sha }}
           path: |
-            build/libs/PlexonShops-2.1.0.jar
+            build/libs/PlexonShops-${{ steps.release_contract.outputs.version }}.jar
             build/release/SHA256SUMS.txt
           if-no-files-found: error
