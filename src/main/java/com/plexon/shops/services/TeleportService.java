@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
 
 /** Cancellable boss-bar warmups followed by Paper asynchronous teleports. */
@@ -34,6 +35,13 @@ public final class TeleportService {
     private final Supplier<MessageService> messages;
     private final Map<UUID, PendingTeleport> pending = new ConcurrentHashMap<>();
     private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
+    private final LongAdder movementEventsReceived = new LongAdder();
+    private final LongAdder movementFastRejects = new LongAdder();
+    private final LongAdder movementCancellations = new LongAdder();
+    private final LongAdder damageEventsReceived = new LongAdder();
+    private final LongAdder damageFastRejects = new LongAdder();
+    private final LongAdder damageCancellations = new LongAdder();
+    private final LongAdder quitCancellations = new LongAdder();
     private BukkitTask progressCoordinator;
     private int coordinatorIntervalTicks;
 
@@ -60,8 +68,40 @@ public final class TeleportService {
         return pending.size();
     }
 
+    public int cooldownCount() {
+        return cooldowns.size();
+    }
+
     public boolean coordinatorRunning() {
         return progressCoordinator != null;
+    }
+
+    public void recordMovementReceived() {
+        movementEventsReceived.increment();
+    }
+
+    public void recordMovementFastReject() {
+        movementFastRejects.increment();
+    }
+
+    public void recordDamageReceived() {
+        damageEventsReceived.increment();
+    }
+
+    public void recordDamageFastReject() {
+        damageFastRejects.increment();
+    }
+
+    public TeleportMetrics metrics() {
+        return new TeleportMetrics(
+                movementEventsReceived.sum(),
+                movementFastRejects.sum(),
+                movementCancellations.sum(),
+                damageEventsReceived.sum(),
+                damageFastRejects.sum(),
+                damageCancellations.sum(),
+                quitCancellations.sum()
+        );
     }
 
     public void request(Player player, Shop requestedShop) {
@@ -139,25 +179,36 @@ public final class TeleportService {
                 Placeholder.unparsed("seconds", Integer.toString(warmup)));
     }
 
-    public void handleMovement(Player player, Location to) {
-        PendingTeleport active = pending.get(player.getUniqueId());
+    /** Source-independent movement facts used by local listeners and future Core subscriptions. */
+    public void handleMovementFacts(UUID playerUuid, UUID destinationWorld, double x, double y, double z) {
+        PendingTeleport active = pending.get(playerUuid);
         if (active == null) {
             return;
         }
-        if (!config.get().teleport().cancelOnMovement() || to.getWorld() == null) {
+        if (!config.get().teleport().cancelOnMovement() || destinationWorld == null) {
             return;
         }
-        if (!to.getWorld().getUID().equals(active.worldUuid()) || squaredDistance(to, active) > 1.0E-6D) {
-            cancel(player.getUniqueId(), "teleport-cancelled");
+        if (!destinationWorld.equals(active.worldUuid()) || squaredDistance(x, y, z, active) > 1.0E-6D) {
+            if (cancel(playerUuid, "teleport-cancelled")) {
+                movementCancellations.increment();
+            }
         }
     }
 
-    public void handleDamage(Player player) {
-        if (!pending.containsKey(player.getUniqueId())) {
+    /** Source-independent damage fact used by local listeners and future Core subscriptions. */
+    public void handleDamageFacts(UUID playerUuid) {
+        if (!pending.containsKey(playerUuid)) {
             return;
         }
-        if (config.get().teleport().cancelOnDamage()) {
-            cancel(player.getUniqueId(), "teleport-cancelled-damage");
+        if (config.get().teleport().cancelOnDamage() && cancel(playerUuid, "teleport-cancelled-damage")) {
+            damageCancellations.increment();
+        }
+    }
+
+    /** Lifecycle fact; pending warmups are cancelled silently on disconnect. */
+    public void handleQuit(UUID playerUuid) {
+        if (cancel(playerUuid, (String) null)) {
+            quitCancellations.increment();
         }
     }
 
@@ -275,19 +326,20 @@ public final class TeleportService {
         stopProgressCoordinatorIfIdle();
     }
 
-    private BossBar createBossBar(Shop shop, int seconds, PluginConfig.TeleportBossBar settings) {
-        if (!settings.enabled()) {
+    private BossBar createBossBar(Shop shop, int seconds, PluginConfig.Teleport settings) {
+        PluginConfig.TeleportBossBar bossBarSettings = settings.bossBar();
+        if (!bossBarSettings.enabled()) {
             return null;
         }
         BossBar.Color color;
         BossBar.Overlay overlay;
         try {
-            color = BossBar.Color.valueOf(settings.color());
+            color = BossBar.Color.valueOf(bossBarSettings.color());
         } catch (IllegalArgumentException ignored) {
             color = BossBar.Color.BLUE;
         }
         try {
-            overlay = BossBar.Overlay.valueOf(settings.overlay());
+            overlay = BossBar.Overlay.valueOf(bossBarSettings.overlay());
         } catch (IllegalArgumentException ignored) {
             overlay = BossBar.Overlay.PROGRESS;
         }
@@ -326,14 +378,17 @@ public final class TeleportService {
                 || (settings.ownersBypassCooldown() && shop.ownerUuid().equals(player.getUniqueId()));
     }
 
-    private void cancel(UUID playerUuid, String messageKey) {
-        if (clearPending(playerUuid) == null || messageKey == null) {
-            return;
+    private boolean cancel(UUID playerUuid, String messageKey) {
+        if (clearPending(playerUuid) == null) {
+            return false;
         }
-        Player player = Bukkit.getPlayer(playerUuid);
-        if (player != null) {
-            messages.get().send(player, messageKey);
+        if (messageKey != null) {
+            Player player = Bukkit.getPlayer(playerUuid);
+            if (player != null) {
+                messages.get().send(player, messageKey);
+            }
         }
+        return true;
     }
 
     private PendingTeleport clearPending(UUID playerUuid) {
@@ -377,11 +432,22 @@ public final class TeleportService {
         return TagResolver.resolver("status", Tag.inserting(component));
     }
 
-    private double squaredDistance(Location location, PendingTeleport origin) {
-        double deltaX = location.getX() - origin.x();
-        double deltaY = location.getY() - origin.y();
-        double deltaZ = location.getZ() - origin.z();
+    private double squaredDistance(double x, double y, double z, PendingTeleport origin) {
+        double deltaX = x - origin.x();
+        double deltaY = y - origin.y();
+        double deltaZ = z - origin.z();
         return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
+    }
+
+    public record TeleportMetrics(
+            long movementEventsReceived,
+            long movementFastRejects,
+            long movementCancellations,
+            long damageEventsReceived,
+            long damageFastRejects,
+            long damageCancellations,
+            long quitCancellations
+    ) {
     }
 
     private record PendingTeleport(
