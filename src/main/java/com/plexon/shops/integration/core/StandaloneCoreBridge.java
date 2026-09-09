@@ -16,6 +16,8 @@ final class StandaloneCoreBridge implements CoreBridge {
     @Override public boolean installed() { return installed; }
     @Override public boolean available() { return false; }
     @Override public boolean compatible() { return false; }
+    @Override public boolean runtimeApi() { return false; }
+    @Override public boolean playerEventRuntimeAvailable() { return false; }
     @Override public String pluginVersion() { return pluginVersion; }
     @Override public String apiVersion() { return apiVersion; }
     @Override public String mode() { return "STANDALONE"; }
