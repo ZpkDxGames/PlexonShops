@@ -8,6 +8,7 @@ import com.plexon.shops.event.ShopEventPublisher;
 import com.plexon.shops.gui.GuiManager;
 import com.plexon.shops.integration.core.CoreBridge;
 import com.plexon.shops.integration.core.CoreBridgeFactory;
+import com.plexon.shops.integration.core.runtime.CoreRuntimeShopsBridge;
 import com.plexon.shops.integrations.PlexonShopsExpansion;
 import com.plexon.shops.integrations.VaultEconomyHook;
 import com.plexon.shops.listeners.GuiListener;
@@ -52,6 +53,7 @@ public final class PlexonShops extends JavaPlugin {
     private PlexonShopsExpansion expansion;
     private PlexonShopsAPI publicApi;
     private CoreBridge coreBridge;
+    private CoreRuntimeShopsBridge coreRuntime;
     private volatile boolean ready;
     private volatile boolean failed;
 
@@ -68,6 +70,7 @@ public final class PlexonShops extends JavaPlugin {
             MessageService initialMessages = loadMessages();
             runtimeConfig.set(initialConfig);
             messageService.set(initialMessages);
+            coreRuntime = CoreRuntimeShopsBridge.resolve(coreBridge, initialConfig.coreRuntime());
 
             worker = new BoundedExecutor(
                     "PlexonShops-IO",
@@ -123,6 +126,9 @@ public final class PlexonShops extends JavaPlugin {
         if (teleports != null) {
             teleports.cancelAll();
         }
+        if (coreRuntime != null) {
+            coreRuntime.close();
+        }
         if (expansion != null) {
             expansion.unregister();
             expansion = null;
@@ -167,7 +173,7 @@ public final class PlexonShops extends JavaPlugin {
 
     /** Low-overhead operational snapshot used by /pshops diagnostics. */
     public DiagnosticsSnapshot diagnostics() {
-        if (!ready || shops == null || teleports == null || worker == null) {
+        if (!ready || shops == null || teleports == null || worker == null || coreRuntime == null) {
             throw new IllegalStateException("PlexonShops is not ready");
         }
         BoundedExecutor.ExecutorMetrics executor = worker.metrics();
@@ -185,13 +191,19 @@ public final class PlexonShops extends JavaPlugin {
                 shops.activeMutationChains(),
                 shops.ownerCreationsInFlight(),
                 teleports.pendingCount(),
+                teleports.cooldownCount(),
                 teleports.coordinatorRunning(),
+                teleports.metrics(),
                 visits,
                 executor,
                 economy != null && economy.available(),
                 Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI"),
                 Bukkit.getPluginManager().isPluginEnabled("PlexonRanks"),
-                coreBridge == null ? "unavailable" : String.valueOf(coreBridge.mode())
+                coreBridge == null ? "-" : coreBridge.pluginVersion(),
+                coreBridge == null ? "-" : coreBridge.apiVersion(),
+                coreBridge == null ? "STANDALONE" : coreBridge.mode(),
+                coreBridge == null ? "NOT_INSTALLED" : coreBridge.registrationState(),
+                coreRuntime.snapshot()
         );
     }
 
@@ -206,9 +218,13 @@ public final class PlexonShops extends JavaPlugin {
             if (!loaded.worker().equals(active.worker())) {
                 getLogger().warning("Worker settings changed during reload; they take effect after a restart.");
             }
+            if (!loaded.coreRuntime().equals(active.coreRuntime())) {
+                getLogger().warning("core-runtime settings changed during reload; event ownership changes take effect after a restart.");
+            }
             PluginConfig runtime = new PluginConfig(
                     active.database(),
                     active.worker(),
+                    active.coreRuntime(),
                     loaded.limits(),
                     loaded.defaults(),
                     loaded.teleport(),
@@ -250,8 +266,10 @@ public final class PlexonShops extends JavaPlugin {
         ready = true;
         publishHealth();
         long inactive = shops.inactiveCount();
+        CoreRuntimeShopsBridge.Snapshot ownership = coreRuntime.snapshot();
         getLogger().info("Loaded " + loaded.size() + " shops (" + inactive + " hidden by inactivity policy). Core mode: "
-                + coreBridge.mode() + ".");
+                + coreBridge.mode() + "; player events: movement=" + ownership.movement()
+                + ", damage=" + ownership.damage() + ", quit=" + ownership.quit() + ", join=" + ownership.join() + ".");
     }
 
     private void registerPublicApi() {
@@ -263,12 +281,18 @@ public final class PlexonShops extends JavaPlugin {
         if (!ready) {
             return;
         }
+        CoreRuntimeShopsBridge.Snapshot ownership = coreRuntime.snapshot();
+        if (ownership.degraded()) {
+            coreBridge.markDegraded(ownership.detail());
+            return;
+        }
         PluginConfig config = runtimeConfig.get();
         if (config.teleport().economyEnabled() && !economy.available()) {
             coreBridge.markDegraded("Shop engine ready; Vault economy provider unavailable");
             return;
         }
-        coreBridge.markReady("Shop engine, SQLite, public API and shop events ready");
+        coreBridge.markReady("Shop engine ready; player events movement=" + ownership.movement()
+                + ", damage=" + ownership.damage() + ", quit=" + ownership.quit() + ", join=" + ownership.join());
     }
 
     private void registerCommands() {
@@ -281,8 +305,12 @@ public final class PlexonShops extends JavaPlugin {
     private void registerListeners() {
         Bukkit.getPluginManager().registerEvents(prompts, this);
         Bukkit.getPluginManager().registerEvents(new GuiListener(guis), this);
-        Bukkit.getPluginManager().registerEvents(new TeleportListener(teleports), this);
-        Bukkit.getPluginManager().registerEvents(new OwnerActivityListener(shops), this);
+        if (coreRuntime.useLocalTeleportListener()) {
+            Bukkit.getPluginManager().registerEvents(new TeleportListener(teleports), this);
+        }
+        if (coreRuntime.useLocalOwnerActivityListener()) {
+            Bukkit.getPluginManager().registerEvents(new OwnerActivityListener(shops), this);
+        }
     }
 
     private void registerPlaceholderExpansion() {
@@ -316,13 +344,19 @@ public final class PlexonShops extends JavaPlugin {
             int activeMutationChains,
             int ownerCreationsInFlight,
             int pendingTeleports,
+            int cooldowns,
             boolean teleportCoordinatorRunning,
+            TeleportService.TeleportMetrics teleportMetrics,
             ShopService.VisitPersistenceMetrics visitPersistence,
             BoundedExecutor.ExecutorMetrics executor,
             boolean vaultAvailable,
             boolean placeholderApiAvailable,
             boolean plexonRanksAvailable,
-            String coreMode
+            String corePluginVersion,
+            String coreApiVersion,
+            String coreMode,
+            String coreRegistrationState,
+            CoreRuntimeShopsBridge.Snapshot runtimeOwnership
     ) {
     }
 
