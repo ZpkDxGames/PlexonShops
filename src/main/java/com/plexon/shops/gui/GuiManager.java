@@ -90,7 +90,7 @@ public final class GuiManager {
     public void openDirectory(Player player, int requestedPage, DirectoryFilter filter) {
         GuiLayout layout = config.get().gui("directory", 54);
         List<Integer> contentSlots = contentSlots(layout, 9, Math.min(45, layout.size()));
-        PageSlice<Shop> page = slice(shops.directory(filter), requestedPage, contentSlots.size());
+        ShopService.DirectoryPage page = shops.directoryPage(filter, requestedPage, contentSlots.size());
         MessageService messageService = messages.get();
         PlexonGuiHolder holder = new PlexonGuiHolder(GuiType.DIRECTORY, null, page.page(), filter);
         Inventory inventory = createInventory(
@@ -521,7 +521,7 @@ public final class GuiManager {
             return;
         }
         int limit = shops.shopLimit(player);
-        int current = shops.ownedBy(player.getUniqueId()).size();
+        int current = shops.ownedCount(player.getUniqueId());
         if (current >= limit) {
             messages.get().send(player, "shop-limit",
                     Placeholder.unparsed("current", Integer.toString(current)),
