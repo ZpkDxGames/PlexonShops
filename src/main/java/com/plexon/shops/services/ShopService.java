@@ -22,11 +22,13 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
@@ -35,12 +37,13 @@ import java.util.logging.Logger;
 
 /** Domain operations with ordered asynchronous durability and post-commit public events. */
 public final class ShopService {
-    private static final Comparator<Shop> DIRECTORY_ORDER = Comparator
-            .comparing((Shop shop) -> shop.status() == ShopStatus.OPEN ? 0 : 1)
-            .thenComparing(Comparator.comparingDouble(Shop::averageRating).reversed())
-            .thenComparing(Shop::name, String.CASE_INSENSITIVE_ORDER)
-            .thenComparing(Shop::id);
+    private static final Comparator<DirectoryEntry> DIRECTORY_ORDER = Comparator
+            .comparingInt(DirectoryEntry::statusOrder)
+            .thenComparing(Comparator.comparingDouble(DirectoryEntry::averageRating).reversed())
+            .thenComparing(DirectoryEntry::normalizedName)
+            .thenComparing(DirectoryEntry::shopId);
     private static final long DIRECTORY_SNAPSHOT_TTL_SECONDS = 60L;
+    private static final long SHOP_LIMIT_CACHE_NANOS = TimeUnit.SECONDS.toNanos(5L);
 
     private final ShopCache cache;
     private final ShopRepository repository;
@@ -56,6 +59,8 @@ public final class ShopService {
     private final Object visitLock = new Object();
     private final Map<UUID, VisitAccumulator> pendingVisitPersistence = new HashMap<>();
     private final Map<UUID, CompletableFuture<Void>> activeVisitFlushes = new HashMap<>();
+    private final Object shopLimitLock = new Object();
+    private final Map<UUID, ShopLimitCacheEntry> shopLimitCache = new HashMap<>();
     private long directoryGeneration;
     private long completedVisitFlushes;
     private long failedVisitFlushes;
@@ -91,6 +96,10 @@ public final class ShopService {
 
     public int ownedCount(UUID ownerUuid) {
         return cache.ownedCount(ownerUuid);
+    }
+
+    public boolean isPrimary(UUID ownerUuid, UUID shopId) {
+        return cache.isPrimary(ownerUuid, shopId);
     }
 
     /**
@@ -159,6 +168,13 @@ public final class ShopService {
         return cache.ownerOrderCacheEntries();
     }
 
+    public int shopLimitCacheEntries() {
+        synchronized (shopLimitLock) {
+            removeExpiredShopLimitsLocked(System.nanoTime());
+            return shopLimitCache.size();
+        }
+    }
+
     public int activeMutationChains() {
         synchronized (mutationLock) {
             return mutationChains.size();
@@ -186,23 +202,43 @@ public final class ShopService {
         }
     }
 
+    /**
+     * Permission scans are cached briefly because GUI flows can request capacity repeatedly. Rank/permission events
+     * explicitly invalidate this entry, while the TTL keeps ordinary permission changes authoritative within seconds.
+     */
     public int shopLimit(Player player) {
-        PluginConfig.Limits limits = config.get().limits();
-        if (player.hasPermission("plexonshops.subshops.unlimited")
-                || player.hasPermission("plexonshops.limit.unlimited")) {
-            return Integer.MAX_VALUE;
+        UUID playerUuid = player.getUniqueId();
+        long now = System.nanoTime();
+        synchronized (shopLimitLock) {
+            ShopLimitCacheEntry cached = shopLimitCache.get(playerUuid);
+            if (cached != null && now < cached.expiresAtNanos()) {
+                return cached.limit();
+            }
+            if (cached != null) {
+                shopLimitCache.remove(playerUuid);
+            }
         }
-        int legacyTotal = PermissionLimitResolver.resolve(
-                candidate -> player.hasPermission("plexonshops.limit." + candidate),
-                limits.maxShopsPerPlayer(),
-                limits.maximumPermissionLimit()
-        );
-        int additional = PermissionLimitResolver.resolve(
-                candidate -> player.hasPermission("plexonshops.subshops." + candidate),
-                0,
-                limits.maximumPermissionLimit()
-        );
-        return Math.max(legacyTotal, Math.addExact(1, additional));
+
+        int resolved = resolveShopLimit(player);
+        synchronized (shopLimitLock) {
+            shopLimitCache.put(playerUuid, new ShopLimitCacheEntry(resolved, now + SHOP_LIMIT_CACHE_NANOS));
+            if (shopLimitCache.size() > 256) {
+                removeExpiredShopLimitsLocked(now);
+            }
+        }
+        return resolved;
+    }
+
+    public void invalidateShopLimit(UUID playerUuid) {
+        synchronized (shopLimitLock) {
+            shopLimitCache.remove(playerUuid);
+        }
+    }
+
+    public void clearShopLimitCache() {
+        synchronized (shopLimitLock) {
+            shopLimitCache.clear();
+        }
     }
 
     public ShopCapacity capacity(Player player) {
@@ -356,9 +392,7 @@ public final class ShopService {
         }
     }
 
-    /**
-     * Coalesces owner activity into one indexed SQL update while preserving per-shop mutation order.
-     */
+    /** Coalesces owner activity into one indexed SQL update while preserving per-shop mutation order. */
     public void touchOwner(UUID ownerUuid, String ownerName) {
         List<Shop> owned = cache.ownedBy(ownerUuid);
         if (owned.isEmpty()) {
@@ -427,6 +461,29 @@ public final class ShopService {
         }
     }
 
+    private int resolveShopLimit(Player player) {
+        PluginConfig.Limits limits = config.get().limits();
+        if (player.hasPermission("plexonshops.subshops.unlimited")
+                || player.hasPermission("plexonshops.limit.unlimited")) {
+            return Integer.MAX_VALUE;
+        }
+        int legacyTotal = PermissionLimitResolver.resolve(
+                candidate -> player.hasPermission("plexonshops.limit." + candidate),
+                limits.maxShopsPerPlayer(),
+                limits.maximumPermissionLimit()
+        );
+        int additional = PermissionLimitResolver.resolve(
+                candidate -> player.hasPermission("plexonshops.subshops." + candidate),
+                0,
+                limits.maximumPermissionLimit()
+        );
+        return Math.max(legacyTotal, Math.addExact(1, additional));
+    }
+
+    private void removeExpiredShopLimitsLocked(long nowNanos) {
+        shopLimitCache.entrySet().removeIf(entry -> nowNanos >= entry.getValue().expiresAtNanos());
+    }
+
     private CompletableFuture<Shop> mutateCore(UUID shopId, UnaryOperator<Shop> mutation) {
         return mutate(shopId, mutation, repository::saveCore);
     }
@@ -481,8 +538,9 @@ public final class ShopService {
         List<UUID> sortedIds = cache.unsortedSnapshot().stream()
                 .filter(shop -> shop.isRecentlyActive(cutoff))
                 .filter(filter::matches)
+                .map(DirectoryEntry::from)
                 .sorted(DIRECTORY_ORDER)
-                .map(Shop::id)
+                .map(DirectoryEntry::shopId)
                 .toList();
         long expiresAt = purgeDays <= 0 ? Long.MAX_VALUE : now + DIRECTORY_SNAPSHOT_TTL_SECONDS;
         DirectorySnapshot rebuilt = new DirectorySnapshot(directoryGeneration, purgeDays, expiresAt, sortedIds);
@@ -653,6 +711,25 @@ public final class ShopService {
             long expiresAtEpochSecond,
             List<UUID> shopIds
     ) {
+    }
+
+    private record DirectoryEntry(
+            UUID shopId,
+            int statusOrder,
+            double averageRating,
+            String normalizedName
+    ) {
+        private static DirectoryEntry from(Shop shop) {
+            return new DirectoryEntry(
+                    shop.id(),
+                    shop.status() == ShopStatus.OPEN ? 0 : 1,
+                    shop.averageRating(),
+                    shop.name().toLowerCase(Locale.ROOT)
+            );
+        }
+    }
+
+    private record ShopLimitCacheEntry(int limit, long expiresAtNanos) {
     }
 
     private record VisitBatch(Shop shop, List<Visitor> uniqueVisitors) {
