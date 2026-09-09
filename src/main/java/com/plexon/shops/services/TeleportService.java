@@ -146,7 +146,7 @@ public final class TeleportService {
         }
 
         Location start = player.getLocation();
-        BossBar bossBar = createBossBar(shop, warmup, settings.teleport().bossBar());
+        BossBar bossBar = createBossBar(shop, warmup, settings.teleport());
         if (bossBar != null) {
             player.showBossBar(bossBar);
         }
