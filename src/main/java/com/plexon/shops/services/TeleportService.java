@@ -19,6 +19,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,8 @@ public final class TeleportService {
     private final Supplier<MessageService> messages;
     private final Map<UUID, PendingTeleport> pending = new ConcurrentHashMap<>();
     private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
+    private BukkitTask progressCoordinator;
+    private int coordinatorIntervalTicks;
 
     public TeleportService(
             JavaPlugin plugin,
@@ -46,6 +49,19 @@ public final class TeleportService {
         this.economy = economy;
         this.config = config;
         this.messages = messages;
+    }
+
+    /** O(1) listener fast gate used before reading movement/damage configuration. */
+    public boolean hasPending(UUID playerUuid) {
+        return pending.containsKey(playerUuid);
+    }
+
+    public int pendingCount() {
+        return pending.size();
+    }
+
+    public boolean coordinatorRunning() {
+        return progressCoordinator != null;
     }
 
     public void request(Player player, Shop requestedShop) {
@@ -73,10 +89,10 @@ public final class TeleportService {
             return;
         }
         if (!bypassesCooldown(player, shop, settings.teleport())) {
-            long remaining = cooldowns.getOrDefault(player.getUniqueId(), 0L) - System.currentTimeMillis();
-            if (remaining > 0L) {
+            long remainingNanos = cooldowns.getOrDefault(player.getUniqueId(), 0L) - System.nanoTime();
+            if (remainingNanos > 0L) {
                 messages.get().send(player, "teleport-cooldown",
-                        Placeholder.unparsed("seconds", Long.toString((remaining + 999L) / 1_000L)));
+                        Placeholder.unparsed("seconds", Long.toString((remainingNanos + 999_999_999L) / 1_000_000_000L)));
                 return;
             }
             cooldowns.remove(player.getUniqueId());
@@ -103,32 +119,32 @@ public final class TeleportService {
                 () -> execute(player, shop.id()),
                 warmup * 20L
         );
-        BukkitTask progress = bossBar == null ? null : Bukkit.getScheduler().runTaskTimer(
-                plugin,
-                () -> updateBossBar(player.getUniqueId(), shop.id(), startedAt, durationNanos),
-                1L,
-                settings.teleport().bossBar().updateIntervalTicks()
-        );
         pending.put(player.getUniqueId(), new PendingTeleport(
+                shop.id(),
+                shop.name(),
                 start.getWorld() == null ? null : start.getWorld().getUID(),
                 start.getX(),
                 start.getY(),
                 start.getZ(),
+                startedAt,
+                durationNanos,
                 completion,
-                progress,
                 bossBar
         ));
+        if (bossBar != null) {
+            ensureProgressCoordinator(settings.teleport().bossBar().updateIntervalTicks());
+        }
         messages.get().send(player, "teleport-start",
                 messages.get().storedTag("shop", shop.name()),
                 Placeholder.unparsed("seconds", Integer.toString(warmup)));
     }
 
     public void handleMovement(Player player, Location to) {
-        if (!config.get().teleport().cancelOnMovement()) {
+        PendingTeleport active = pending.get(player.getUniqueId());
+        if (active == null) {
             return;
         }
-        PendingTeleport active = pending.get(player.getUniqueId());
-        if (active == null || to.getWorld() == null) {
+        if (!config.get().teleport().cancelOnMovement() || to.getWorld() == null) {
             return;
         }
         if (!to.getWorld().getUID().equals(active.worldUuid()) || squaredDistance(to, active) > 1.0E-6D) {
@@ -137,6 +153,9 @@ public final class TeleportService {
     }
 
     public void handleDamage(Player player) {
+        if (!pending.containsKey(player.getUniqueId())) {
+            return;
+        }
         if (config.get().teleport().cancelOnDamage()) {
             cancel(player.getUniqueId(), "teleport-cancelled-damage");
         }
@@ -147,8 +166,11 @@ public final class TeleportService {
     }
 
     public void cancelAll() {
-        pending.keySet().forEach(uuid -> cancel(uuid, (String) null));
+        for (UUID playerUuid : List.copyOf(pending.keySet())) {
+            cancel(playerUuid, (String) null);
+        }
         cooldowns.clear();
+        stopProgressCoordinator();
     }
 
     private void execute(Player player, UUID shopId) {
@@ -197,7 +219,7 @@ public final class TeleportService {
             shops.recordVisit(shop.id(), player.getUniqueId());
             if (!bypassesCooldown(player, shop, settings.teleport()) && settings.teleport().cooldownSeconds() > 0) {
                 cooldowns.put(player.getUniqueId(),
-                        System.currentTimeMillis() + settings.teleport().cooldownSeconds() * 1_000L);
+                        System.nanoTime() + settings.teleport().cooldownSeconds() * 1_000_000_000L);
             }
             playEffects(player, true, settings.teleport().effects());
             messages.get().send(player, "teleport-success", messages.get().storedTag("shop", shop.name()));
@@ -208,26 +230,49 @@ public final class TeleportService {
         }));
     }
 
-    private void updateBossBar(UUID playerUuid, UUID shopId, long startedAt, long durationNanos) {
-        PendingTeleport active = pending.get(playerUuid);
-        if (active == null || active.bossBar() == null) {
+    private void ensureProgressCoordinator(int updateIntervalTicks) {
+        int interval = Math.max(1, updateIntervalTicks);
+        if (progressCoordinator != null && coordinatorIntervalTicks == interval) {
             return;
         }
-        Player player = Bukkit.getPlayer(playerUuid);
-        Shop shop = shops.find(shopId).orElse(null);
-        if (player == null || shop == null) {
-            cancel(playerUuid, (String) null);
-            return;
+        stopProgressCoordinator();
+        coordinatorIntervalTicks = interval;
+        progressCoordinator = Bukkit.getScheduler().runTaskTimer(
+                plugin,
+                this::updateBossBars,
+                1L,
+                interval
+        );
+    }
+
+    private void updateBossBars() {
+        long now = System.nanoTime();
+        for (Map.Entry<UUID, PendingTeleport> entry : pending.entrySet()) {
+            UUID playerUuid = entry.getKey();
+            PendingTeleport active = entry.getValue();
+            if (active.bossBar() == null) {
+                continue;
+            }
+            Player player = Bukkit.getPlayer(playerUuid);
+            if (player == null || !player.isOnline()) {
+                cancel(playerUuid, (String) null);
+                continue;
+            }
+            long remainingNanos = Math.max(0L, active.durationNanos() - (now - active.startedAtNanos()));
+            float progress = (float) Math.clamp(
+                    remainingNanos / (double) active.durationNanos(),
+                    0.0D,
+                    1.0D
+            );
+            long seconds = Math.max(1L, (remainingNanos + 999_999_999L) / 1_000_000_000L);
+            active.bossBar().progress(progress);
+            active.bossBar().name(messages.get().get(
+                    "teleport-bossbar",
+                    messages.get().storedTag("shop", active.shopDisplayName()),
+                    Placeholder.unparsed("seconds", Long.toString(seconds))
+            ));
         }
-        long remainingNanos = Math.max(0L, durationNanos - (System.nanoTime() - startedAt));
-        float progress = (float) Math.clamp(remainingNanos / (double) durationNanos, 0.0D, 1.0D);
-        long seconds = Math.max(1L, (remainingNanos + 999_999_999L) / 1_000_000_000L);
-        active.bossBar().progress(progress);
-        active.bossBar().name(messages.get().get(
-                "teleport-bossbar",
-                messages.get().storedTag("shop", shop.name()),
-                Placeholder.unparsed("seconds", Long.toString(seconds))
-        ));
+        stopProgressCoordinatorIfIdle();
     }
 
     private BossBar createBossBar(Shop shop, int seconds, PluginConfig.TeleportBossBar settings) {
@@ -297,14 +342,30 @@ public final class TeleportService {
             return null;
         }
         removed.completionTask().cancel();
-        if (removed.progressTask() != null) {
-            removed.progressTask().cancel();
-        }
         Player player = Bukkit.getPlayer(playerUuid);
         if (player != null && removed.bossBar() != null) {
             player.hideBossBar(removed.bossBar());
         }
+        stopProgressCoordinatorIfIdle();
         return removed;
+    }
+
+    private void stopProgressCoordinatorIfIdle() {
+        if (progressCoordinator == null) {
+            return;
+        }
+        boolean bossBarPending = pending.values().stream().anyMatch(active -> active.bossBar() != null);
+        if (!bossBarPending) {
+            stopProgressCoordinator();
+        }
+    }
+
+    private void stopProgressCoordinator() {
+        if (progressCoordinator != null) {
+            progressCoordinator.cancel();
+            progressCoordinator = null;
+        }
+        coordinatorIntervalTicks = 0;
     }
 
     private TagResolver statusResolver(ShopStatus status) {
@@ -324,12 +385,15 @@ public final class TeleportService {
     }
 
     private record PendingTeleport(
+            UUID shopId,
+            String shopDisplayName,
             UUID worldUuid,
             double x,
             double y,
             double z,
+            long startedAtNanos,
+            long durationNanos,
             BukkitTask completionTask,
-            BukkitTask progressTask,
             BossBar bossBar
     ) {
     }
