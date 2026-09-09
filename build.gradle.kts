@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.plexon"
-version = "2.2.0"
+version = "2.2.1"
 
 val pluginVersion = version.toString()
 
@@ -17,7 +17,7 @@ java {
 
 dependencies {
     compileOnly("io.papermc.paper:paper-api:26.2.build.121-stable")
-    compileOnly("com.zpkdxgames:PlexonCore:1.0.0")
+    compileOnly("com.zpkdxgames:PlexonCore:2.0.4")
     compileOnly("me.clip:placeholderapi:2.12.1")
     compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
         exclude(group = "org.bukkit", module = "bukkit")

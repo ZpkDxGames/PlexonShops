@@ -39,15 +39,11 @@ public final class PlexonCoreBridge implements CoreBridge {
         this.plugin = plugin;
         RegisteredServiceProvider<PlexonCoreAPI> registration =
                 Bukkit.getServicesManager().getRegistration(PlexonCoreAPI.class);
-        if (registration == null) {
-            throw new IllegalStateException("PlexonCore API service is not registered");
-        }
+        if (registration == null) throw new IllegalStateException("PlexonCore API service is not registered");
         this.core = registration.getProvider();
         this.version = core.version();
         this.compatible = ModuleVersionRange.parse(SUPPORTED_API_RANGE).contains(version);
-        if (!compatible) {
-            detail = "Core API " + version.apiVersion() + " is outside supported range " + SUPPORTED_API_RANGE;
-        }
+        if (!compatible) detail = "Core API " + version.apiVersion() + " is outside supported range " + SUPPORTED_API_RANGE;
     }
 
     @Override public boolean installed() { return true; }
@@ -59,17 +55,13 @@ public final class PlexonCoreBridge implements CoreBridge {
 
     @Override
     public String registrationState() {
-        if (ownsRegistration) {
-            return core.modules().find(MODULE_ID).map(descriptor -> descriptor.state().name()).orElse("NOT_REGISTERED");
-        }
+        if (ownsRegistration) return core.modules().find(MODULE_ID).map(descriptor -> descriptor.state().name()).orElse("NOT_REGISTERED");
         return registrationState;
     }
 
     @Override
     public String detail() {
-        if (ownsRegistration) {
-            return core.modules().find(MODULE_ID).map(ModuleDescriptor::detail).orElse(detail);
-        }
+        if (ownsRegistration) return core.modules().find(MODULE_ID).map(ModuleDescriptor::detail).orElse(detail);
         return detail;
     }
 
@@ -106,17 +98,31 @@ public final class PlexonCoreBridge implements CoreBridge {
 
     private void update(ModuleState state, String newDetail) {
         if (!compatible || !ownsRegistration) return;
-        core.modules().updateState(MODULE_ID, state, newDetail);
+        String resolvedDetail = newDetail == null ? "" : newDetail;
+        if (version.apiMajor() >= 2) {
+            if (!core.modules().updateState(MODULE_ID, plugin, state, resolvedDetail)) {
+                ownsRegistration = false;
+                registrationState = "NOT_REGISTERED";
+                detail = "Core module ownership changed before state update";
+                return;
+            }
+        } else {
+            core.modules().updateState(MODULE_ID, state, resolvedDetail);
+        }
         registrationState = state.name();
-        detail = newDetail == null ? "" : newDetail;
+        detail = resolvedDetail;
     }
 
     @Override
     public void unregister() {
         if (!ownsRegistration) return;
-        core.modules().find(MODULE_ID)
-                .filter(descriptor -> descriptor.plugin() == plugin)
-                .ifPresent(descriptor -> core.modules().unregister(MODULE_ID));
+        if (version.apiMajor() >= 2) {
+            core.modules().unregisterOwnedBy(plugin);
+        } else {
+            core.modules().find(MODULE_ID)
+                    .filter(descriptor -> descriptor.plugin() == plugin)
+                    .ifPresent(descriptor -> core.modules().unregister(MODULE_ID));
+        }
         ownsRegistration = false;
         registrationState = "UNREGISTERED";
     }
