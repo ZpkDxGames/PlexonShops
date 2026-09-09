@@ -12,7 +12,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.util.UUID;
 
-/** Movement, damage and disconnect cancellation for pending shop teleports. */
+/** Optimized local fallback for movement, damage and disconnect teleport guards. */
 public final class TeleportListener implements Listener {
     private final TeleportService teleports;
 
@@ -22,9 +22,11 @@ public final class TeleportListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onMove(PlayerMoveEvent event) {
+        teleports.recordMovementReceived();
         Player player = event.getPlayer();
         UUID playerUuid = player.getUniqueId();
         if (!teleports.hasPending(playerUuid)) {
+            teleports.recordMovementFastReject();
             return;
         }
         Location from = event.getFrom();
@@ -32,7 +34,13 @@ public final class TeleportListener implements Listener {
         if (to == null || samePosition(from, to)) {
             return;
         }
-        teleports.handleMovement(player, to);
+        teleports.handleMovementFacts(
+                playerUuid,
+                to.getWorld() == null ? null : to.getWorld().getUID(),
+                to.getX(),
+                to.getY(),
+                to.getZ()
+        );
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -40,15 +48,18 @@ public final class TeleportListener implements Listener {
         if (!(event.getEntity() instanceof Player player)) {
             return;
         }
-        if (!teleports.hasPending(player.getUniqueId())) {
+        teleports.recordDamageReceived();
+        UUID playerUuid = player.getUniqueId();
+        if (!teleports.hasPending(playerUuid)) {
+            teleports.recordDamageFastReject();
             return;
         }
-        teleports.handleDamage(player);
+        teleports.handleDamageFacts(playerUuid);
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        teleports.cancel(event.getPlayer().getUniqueId(), false);
+        teleports.handleQuit(event.getPlayer().getUniqueId());
     }
 
     private boolean samePosition(Location from, Location to) {
