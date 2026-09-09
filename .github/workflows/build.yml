@@ -30,20 +30,20 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Provision PlexonCore 1.0.0 API
+      - name: Provision PlexonCore 2.0.0 API
         shell: bash
         run: |
           set -euo pipefail
-          core_jar="${RUNNER_TEMP}/PlexonCore-1.0.0.jar"
+          core_jar="${RUNNER_TEMP}/PlexonCore-2.0.0.jar"
           curl --fail --location --silent --show-error \
             --output "${core_jar}" \
-            "https://github.com/ZpkDxGames/PlexonCore/releases/download/v1.0.0/PlexonCore-1.0.0.jar"
-          echo "4abce6de93293e21b31cb874734430d5bdc77de17a4c3b98fd6a9006e1f13018  ${core_jar}" | sha256sum --check
+            "https://github.com/ZpkDxGames/PlexonCore/releases/download/v2.0.0/PlexonCore-2.0.0.jar"
+          echo "179b82ce7fd82e3095b3a6d0d893af6d7c97f91bd7ce403e96d7f3581462dfec  ${core_jar}" | sha256sum --check
           mvn -B -ntp org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
             -Dfile="${core_jar}" \
             -DgroupId=com.zpkdxgames \
             -DartifactId=PlexonCore \
-            -Dversion=1.0.0 \
+            -Dversion=2.0.0 \
             -Dpackaging=jar \
             -DgeneratePom=true
 
@@ -64,6 +64,7 @@ jobs:
           grep -qx 'com/plexon/shops/event/PlexonShopCreatedEvent.class' build/jar-contents.txt
           grep -qx 'com/plexon/shops/event/PlexonShopVisitedEvent.class' build/jar-contents.txt
           grep -qx 'com/plexon/shops/event/PlexonShopRatedEvent.class' build/jar-contents.txt
+          grep -qx 'com/plexon/shops/integration/core/runtime/CoreRuntimeShopsBridge.class' build/jar-contents.txt
           if grep -q '^com/zpkdxgames/plexoncore/' build/jar-contents.txt; then
             echo 'PlexonCore runtime classes must not be shaded into PlexonShops' >&2
             exit 1
@@ -73,8 +74,14 @@ jobs:
           javap -verbose -classpath "${jar_path}" com.plexon.shops.PlexonShops \
             | grep -q 'major version: 69'
           mkdir -p build/release
-          sha256sum "${jar_path}" > build/release/SHA256SUMS.txt
-          sha256sum --check build/release/SHA256SUMS.txt
+          (
+            cd build/libs
+            sha256sum "PlexonShops-${VERSION}.jar" > ../release/SHA256SUMS.txt
+          )
+          (
+            cd build/libs
+            sha256sum --check ../release/SHA256SUMS.txt
+          )
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Check whitespace
