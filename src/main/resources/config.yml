@@ -1,4 +1,4 @@
-# PlexonShops 2.0.0
+# PlexonShops 2.3.0
 # Runtime database work is always executed away from the server thread.
 
 database:
@@ -10,6 +10,19 @@ worker:
   threads: 2
   queue-capacity: 2048
   shutdown-timeout-seconds: 10
+
+# PlexonCore event ownership is selected at plugin enable. Core 2.0.0 does not yet
+# expose movement/damage/lifecycle subscriptions, so AUTO keeps those paths LOCAL.
+core-runtime:
+  mode: AUTO
+  player-events:
+    movement: true
+    damage: true
+    lifecycle: true
+  fallback:
+    allow-local-listeners: true
+  diagnostics:
+    track-fallbacks: true
 
 limits:
   # This includes the player's primary shop. Additional shops are sub-shops.
