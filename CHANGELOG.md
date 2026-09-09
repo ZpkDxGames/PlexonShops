@@ -2,6 +2,20 @@
 
 All notable changes to PlexonShops are documented here.
 
+## 2.3.0 - 2026-09-09
+
+- Updated PlexonCore compatibility and CI provisioning to the stable PlexonCore 2.0.0 Runtime API while retaining legacy Core 1.x module compatibility.
+- Audited the actual Core 2.0.0 runtime surface and confirmed that it does not yet expose public movement, damage, join, or quit subscriptions; PlexonShops therefore retains the optimized local player-event acquisition path instead of inventing a shop-only Core contract.
+- Added explicit runtime ownership selection (`AUTO`, `CORE`, `LOCAL`) and diagnostics that report movement, damage, quit, join, GUI, and chat ownership separately from Core module registration.
+- Refactored teleport warmup movement, damage, and quit handling into source-independent fact methods so future Core player-event subscriptions can reuse the same domain rules without duplicate cancellation logic.
+- Preserved the O(1) no-pending movement/damage gates, rotation-only rejection, `MONITOR + ignoreCancelled` semantics, cross-world cancellation, and `1.0E-6` movement epsilon.
+- Added low-overhead movement/damage/quit counters, cooldown count, runtime epoch, fallback-family count, and Core version/module state to `/pshops diagnostics`.
+- Kept GUI events, chat prompts, shop persistence, caches, Vault charging/refunds, Paper async teleport, bossbar coordination, cooldown timing, visitor persistence, and public shop API/events Shops-owned.
+- Pinned CI/release builds to the exact PlexonCore 2.0.0 JAR SHA-256 and added the runtime bridge to distribution verification while continuing to reject shaded Core classes.
+- Hardened stable release publication so existing GitHub Release assets are never silently overwritten with `--clobber`.
+- Added Core runtime audit, runtime-operation, and performance-evidence documentation. Real Paper/Spark/soak values remain explicitly `NOT EXECUTED` until measured on staging.
+- No destructive SQLite migration or public API/event break is introduced by 2.3.0.
+
 ## 2.2.0 - 2026-09-09
 
 - Reworked marketplace directory reads around generation-cached indexes so category/filter ordering is rebuilt only when directory-relevant shop state changes.
