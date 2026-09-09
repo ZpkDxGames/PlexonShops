@@ -7,7 +7,6 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -20,6 +19,7 @@ import java.util.stream.Collectors;
 public record PluginConfig(
         Database database,
         Worker worker,
+        CoreRuntime coreRuntime,
         Limits limits,
         Defaults defaults,
         Teleport teleport,
@@ -29,6 +29,7 @@ public record PluginConfig(
         Map<String, GuiLayout> guis
 ) {
     public PluginConfig {
+        coreRuntime = coreRuntime == null ? CoreRuntime.defaults() : coreRuntime;
         blacklistedWorlds = Set.copyOf(blacklistedWorlds);
         guis = Map.copyOf(guis);
     }
@@ -47,6 +48,16 @@ public record PluginConfig(
                 Math.clamp(yaml.getInt("worker.threads", 2), 1, 8),
                 Math.clamp(yaml.getInt("worker.queue-capacity", 2_048), 64, 65_536),
                 Math.clamp(yaml.getInt("worker.shutdown-timeout-seconds", 10), 1, 60)
+        );
+        CoreRuntime coreRuntime = new CoreRuntime(
+                CoreRuntimeMode.parse(yaml.getString("core-runtime.mode", "AUTO")),
+                new PlayerEvents(
+                        yaml.getBoolean("core-runtime.player-events.movement", true),
+                        yaml.getBoolean("core-runtime.player-events.damage", true),
+                        yaml.getBoolean("core-runtime.player-events.lifecycle", true)
+                ),
+                yaml.getBoolean("core-runtime.fallback.allow-local-listeners", true),
+                yaml.getBoolean("core-runtime.diagnostics.track-fallbacks", true)
         );
         Limits limits = new Limits(
                 Math.clamp(yaml.getInt("limits.max-shops-per-player", 1), 1, 100),
@@ -106,6 +117,7 @@ public record PluginConfig(
         return new PluginConfig(
                 database,
                 worker,
+                coreRuntime,
                 limits,
                 defaults,
                 teleport,
@@ -165,6 +177,42 @@ public record PluginConfig(
     }
 
     public record Worker(int threads, int queueCapacity, int shutdownTimeoutSeconds) {
+    }
+
+    public record CoreRuntime(
+            CoreRuntimeMode mode,
+            PlayerEvents playerEvents,
+            boolean allowLocalListeners,
+            boolean trackFallbacks
+    ) {
+        public CoreRuntime {
+            mode = mode == null ? CoreRuntimeMode.AUTO : mode;
+            playerEvents = playerEvents == null ? new PlayerEvents(true, true, true) : playerEvents;
+        }
+
+        public static CoreRuntime defaults() {
+            return new CoreRuntime(CoreRuntimeMode.AUTO, new PlayerEvents(true, true, true), true, true);
+        }
+    }
+
+    public enum CoreRuntimeMode {
+        AUTO,
+        CORE,
+        LOCAL;
+
+        static CoreRuntimeMode parse(String raw) {
+            if (raw == null) {
+                return AUTO;
+            }
+            try {
+                return valueOf(raw.strip().toUpperCase(Locale.ROOT));
+            } catch (IllegalArgumentException ignored) {
+                return AUTO;
+            }
+        }
+    }
+
+    public record PlayerEvents(boolean movement, boolean damage, boolean lifecycle) {
     }
 
     public record Limits(
