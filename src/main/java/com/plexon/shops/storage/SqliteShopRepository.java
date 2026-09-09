@@ -182,7 +182,7 @@ public final class SqliteShopRepository implements ShopRepository {
             try (Connection connection = connection();
                  PreparedStatement statement = connection.prepareStatement("""
                          UPDATE shops
-                         SET owner_name = ?, last_owner_seen = ?, updated_at = ?
+                         SET owner_name = ?, last_owner_seen = ?, updated_at = MAX(updated_at, ?)
                          WHERE owner_uuid = ?
                          """)) {
                 statement.setString(1, ownerName);
@@ -219,14 +219,15 @@ public final class SqliteShopRepository implements ShopRepository {
     }
 
     @Override
-    public CompletableFuture<Void> recordVisit(Shop shop, Visitor visitor) {
+    public CompletableFuture<Void> recordVisits(Shop shop, List<Visitor> newUniqueVisitors) {
         return executor.run(() -> {
             ensureInitialized();
             try (Connection connection = connection()) {
                 connection.setAutoCommit(false);
                 try {
                     try (PreparedStatement update = connection.prepareStatement(
-                            "UPDATE shops SET total_visitors = ?, updated_at = ? WHERE id = ?")) {
+                            "UPDATE shops SET total_visitors = MAX(total_visitors, ?), "
+                                    + "updated_at = MAX(updated_at, ?) WHERE id = ?")) {
                         update.setLong(1, shop.visitors().totalVisits());
                         update.setLong(2, shop.updatedAtEpochSecond());
                         update.setString(3, shop.id().toString());
@@ -234,14 +235,19 @@ public final class SqliteShopRepository implements ShopRepository {
                             throw new SQLException("Shop row does not exist: " + shop.id());
                         }
                     }
-                    try (PreparedStatement insert = connection.prepareStatement("""
-                            INSERT INTO visitors (shop_id, player_uuid, first_visited_at) VALUES (?, ?, ?)
-                            ON CONFLICT(shop_id, player_uuid) DO NOTHING
-                            """)) {
-                        insert.setString(1, shop.id().toString());
-                        insert.setString(2, visitor.playerUuid().toString());
-                        insert.setLong(3, visitor.firstVisitedAtEpochSecond());
-                        insert.executeUpdate();
+                    if (!newUniqueVisitors.isEmpty()) {
+                        try (PreparedStatement insert = connection.prepareStatement("""
+                                INSERT INTO visitors (shop_id, player_uuid, first_visited_at) VALUES (?, ?, ?)
+                                ON CONFLICT(shop_id, player_uuid) DO NOTHING
+                                """)) {
+                            for (Visitor visitor : newUniqueVisitors) {
+                                insert.setString(1, shop.id().toString());
+                                insert.setString(2, visitor.playerUuid().toString());
+                                insert.setLong(3, visitor.firstVisitedAtEpochSecond());
+                                insert.addBatch();
+                            }
+                            insert.executeBatch();
+                        }
                     }
                     connection.commit();
                 } catch (SQLException error) {
@@ -251,7 +257,7 @@ public final class SqliteShopRepository implements ShopRepository {
                     connection.setAutoCommit(true);
                 }
             } catch (SQLException error) {
-                throw new StorageException("Could not record visit for shop " + shop.id(), error);
+                throw new StorageException("Could not record visits for shop " + shop.id(), error);
             }
         });
     }
