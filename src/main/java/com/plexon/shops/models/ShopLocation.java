@@ -37,7 +37,19 @@ public record ShopLocation(
         );
     }
 
+    /** Returns false for malformed persisted coordinates without mutating the stored destination. */
+    public boolean hasFiniteCoordinates() {
+        return Double.isFinite(x)
+                && Double.isFinite(y)
+                && Double.isFinite(z)
+                && Float.isFinite(yaw)
+                && Float.isFinite(pitch);
+    }
+
     public Optional<Location> resolve() {
+        if (!hasFiniteCoordinates()) {
+            return Optional.empty();
+        }
         World world = worldUuid == null ? null : Bukkit.getWorld(worldUuid);
         if (world == null && !worldName.isBlank()) {
             world = Bukkit.getWorld(worldName);
