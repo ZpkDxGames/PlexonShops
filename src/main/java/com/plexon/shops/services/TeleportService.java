@@ -38,6 +38,7 @@ public final class TeleportService {
     private final Supplier<MessageService> messages;
     private final Map<UUID, PendingTeleport> pending = new ConcurrentHashMap<>();
     private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
+    private final TeleportAttemptRegistry<InFlightTeleport> inFlight = new TeleportAttemptRegistry<>();
     private BukkitTask progressCoordinator;
     private int coordinatorIntervalTicks;
 
@@ -65,7 +66,11 @@ public final class TeleportService {
     }
 
     public int pendingCount() {
-        return pending.size();
+        return pending.size() + inFlight.size();
+    }
+
+    public int inFlightCount() {
+        return inFlight.size();
     }
 
     public boolean coordinatorRunning() {
@@ -76,6 +81,11 @@ public final class TeleportService {
         PluginConfig settings = config.get();
         if (!settings.teleport().enabled()) {
             messages.get().send(player, "teleport-disabled");
+            return;
+        }
+        UUID playerUuid = player.getUniqueId();
+        if (pending.containsKey(playerUuid) || inFlight.contains(playerUuid)) {
+            messages.get().send(player, "teleport-in-progress");
             return;
         }
         Shop shop = shops.find(requestedShop.id()).orElse(null);
@@ -98,7 +108,6 @@ public final class TeleportService {
             cooldowns.remove(player.getUniqueId());
         }
 
-        cancel(player.getUniqueId(), false);
         int warmup = settings.teleport().warmupSeconds();
         if (warmup <= 0) {
             execute(player, shop.id());
@@ -161,6 +170,9 @@ public final class TeleportService {
         for (UUID playerUuid : List.copyOf(pending.keySet())) {
             cancel(playerUuid, (String) null);
         }
+        for (InFlightTeleport attempt : inFlight.drain()) {
+            economy.refund(attempt.player(), attempt.chargedAmount());
+        }
         cooldowns.clear();
         stopProgressCoordinator();
     }
@@ -182,12 +194,20 @@ public final class TeleportService {
         Location destination = resolved.destination();
         PluginConfig settings = config.get();
 
+        UUID playerUuid = player.getUniqueId();
+        InFlightTeleport attempt = new InFlightTeleport(player);
+        if (!inFlight.begin(playerUuid, attempt)) {
+            messages.get().send(player, "teleport-in-progress");
+            return;
+        }
+
         boolean feeBypass = player.hasPermission("plexonshops.teleport.fee.bypass")
-                || (settings.teleport().ownersBypassFee() && shop.ownerUuid().equals(player.getUniqueId()));
+                || (settings.teleport().ownersBypassFee() && shop.ownerUuid().equals(playerUuid));
         VaultEconomyHook.ChargeResult charge = feeBypass
                 ? VaultEconomyHook.ChargeResult.free()
                 : economy.charge(player, shop.teleportFee());
         if (!charge.success()) {
+            inFlight.complete(playerUuid, attempt);
             if (charge.failure() == VaultEconomyHook.ChargeFailure.INSUFFICIENT_FUNDS) {
                 messages.get().send(player, "insufficient-funds",
                         Placeholder.unparsed("fee", economy.format(shop.teleportFee())));
@@ -196,32 +216,63 @@ public final class TeleportService {
             }
             return;
         }
+        attempt.chargedAmount(charge.chargedAmount());
 
-        player.teleportAsync(destination).whenComplete((success, error) -> Bukkit.getScheduler().runTask(plugin, () -> {
-            if (error != null || !Boolean.TRUE.equals(success)) {
-                economy.refund(player, charge.chargedAmount());
+        try {
+            player.teleportAsync(destination).whenComplete((success, error) -> {
+                if (!inFlight.isAuthoritative(playerUuid, attempt)) {
+                    return;
+                }
+                Bukkit.getScheduler().runTask(plugin, () -> finishAttempt(
+                        playerUuid, attempt, shop, settings, Boolean.TRUE.equals(success), error));
+            });
+        } catch (RuntimeException error) {
+            if (inFlight.complete(playerUuid, attempt)) {
+                economy.refund(player, attempt.chargedAmount());
                 messages.get().send(player, "teleport-failed");
+            }
+        }
+    }
+
+    private void finishAttempt(
+            UUID playerUuid,
+            InFlightTeleport attempt,
+            Shop shop,
+            PluginConfig settings,
+            boolean success,
+            Throwable error
+    ) {
+        if (!inFlight.isAuthoritative(playerUuid, attempt)) {
+            return;
+        }
+        try {
+            if (error != null || !success) {
+                economy.refund(attempt.player(), attempt.chargedAmount());
+                messages.get().send(attempt.player(), "teleport-failed");
                 return;
             }
-            shops.recordVisit(shop.id(), player.getUniqueId()).exceptionally(recordError -> {
+            shops.recordVisit(shop.id(), playerUuid).exceptionally(recordError -> {
                 plugin.getLogger().log(Level.WARNING, "Could not persist authoritative shop visit for " + shop.id(), recordError);
                 return null;
             });
-            discovery.recordVisit(player.getUniqueId(), shop.id()).exceptionally(recordError -> {
+            discovery.recordVisit(playerUuid, shop.id()).exceptionally(recordError -> {
                 plugin.getLogger().log(Level.WARNING, "Could not persist recent shop history for " + shop.id(), recordError);
                 return null;
             });
-            if (!bypassesCooldown(player, shop, settings.teleport()) && settings.teleport().cooldownSeconds() > 0) {
-                cooldowns.put(player.getUniqueId(),
+            if (!bypassesCooldown(attempt.player(), shop, settings.teleport())
+                    && settings.teleport().cooldownSeconds() > 0) {
+                cooldowns.put(playerUuid,
                         System.nanoTime() + settings.teleport().cooldownSeconds() * 1_000_000_000L);
             }
-            playEffects(player, true, settings.teleport().effects());
-            messages.get().send(player, "teleport-success", messages.get().storedTag("shop", shop.name()));
-            player.sendActionBar(messages.get().get(
+            playEffects(attempt.player(), true, settings.teleport().effects());
+            messages.get().send(attempt.player(), "teleport-success", messages.get().storedTag("shop", shop.name()));
+            attempt.player().sendActionBar(messages.get().get(
                     "teleport-arrival-actionbar",
                     messages.get().storedTag("shop", shop.name())
             ));
-        }));
+        } finally {
+            inFlight.complete(playerUuid, attempt);
+        }
     }
 
     private void ensureProgressCoordinator(int updateIntervalTicks) {
@@ -334,7 +385,13 @@ public final class TeleportService {
     }
 
     private void cancel(UUID playerUuid, String messageKey) {
-        if (clearPending(playerUuid) == null || messageKey == null) {
+        boolean cancelled = clearPending(playerUuid) != null;
+        InFlightTeleport attempt = inFlight.cancel(playerUuid);
+        if (attempt != null) {
+            economy.refund(attempt.player(), attempt.chargedAmount());
+            cancelled = true;
+        }
+        if (!cancelled || messageKey == null) {
             return;
         }
         Player player = Bukkit.getPlayer(playerUuid);
@@ -392,6 +449,27 @@ public final class TeleportService {
         double deltaY = location.getY() - origin.y();
         double deltaZ = location.getZ() - origin.z();
         return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
+    }
+
+    private static final class InFlightTeleport {
+        private final Player player;
+        private double chargedAmount;
+
+        private InFlightTeleport(Player player) {
+            this.player = player;
+        }
+
+        private Player player() {
+            return player;
+        }
+
+        private double chargedAmount() {
+            return chargedAmount;
+        }
+
+        private void chargedAmount(double value) {
+            chargedAmount = Math.max(0.0D, value);
+        }
     }
 
     private record PendingTeleport(

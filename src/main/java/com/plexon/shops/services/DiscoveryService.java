@@ -15,6 +15,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.LongSupplier;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -29,12 +30,20 @@ public final class DiscoveryService {
     private final Object lock = new Object();
     private final LinkedHashMap<UUID, PlayerDiscoveryData> playerCache = new LinkedHashMap<>(32, 0.75F, true);
     private final Map<UUID, CompletableFuture<Void>> loads = new HashMap<>();
+    private final Map<UUID, Long> playerGenerations = new HashMap<>();
+    private final LongSupplier directoryGeneration;
+    private long invalidationGeneration;
     private volatile Set<UUID> featured = Set.of();
 
     public DiscoveryService(ShopRepository repository, ShopService shops, Logger logger) {
+        this(repository, shops, logger, shops::directoryGeneration);
+    }
+
+    DiscoveryService(ShopRepository repository, ShopService shops, Logger logger, LongSupplier directoryGeneration) {
         this.repository = repository;
         this.shops = shops;
         this.logger = logger;
+        this.directoryGeneration = directoryGeneration;
     }
 
     public CompletableFuture<Void> initialize() {
@@ -43,6 +52,7 @@ public final class DiscoveryService {
 
     /** Lazy-loads one player's bounded discovery state. Concurrent requests share the same future. */
     public CompletableFuture<Void> preload(UUID playerUuid) {
+        long directoryRevision = directoryGeneration.getAsLong();
         synchronized (lock) {
             if (playerCache.containsKey(playerUuid)) {
                 playerCache.get(playerUuid); // refresh access order
@@ -52,9 +62,17 @@ public final class DiscoveryService {
             if (active != null) {
                 return active;
             }
+            long playerRevision = playerGenerationLocked(playerUuid);
+            long invalidationRevision = invalidationGeneration;
             CompletableFuture<Void> load = repository.loadDiscovery(playerUuid, RECENT_LIMIT)
                     .thenAccept(data -> {
+                        long currentDirectoryRevision = directoryGeneration.getAsLong();
                         synchronized (lock) {
+                            if (playerGenerationLocked(playerUuid) != playerRevision
+                                    || invalidationGeneration != invalidationRevision
+                                    || currentDirectoryRevision != directoryRevision) {
+                                return;
+                            }
                             playerCache.put(playerUuid, data);
                             trimPlayerCacheLocked();
                         }
@@ -64,6 +82,9 @@ public final class DiscoveryService {
                 synchronized (lock) {
                     if (loads.get(playerUuid) == load) {
                         loads.remove(playerUuid);
+                    }
+                    if (!loads.containsKey(playerUuid) && !playerCache.containsKey(playerUuid)) {
+                        playerGenerations.remove(playerUuid);
                     }
                 }
                 if (error != null) {
@@ -148,6 +169,7 @@ public final class DiscoveryService {
             synchronized (lock) {
                 PlayerDiscoveryData current = playerCache.getOrDefault(playerUuid, PlayerDiscoveryData.empty());
                 favorite = !current.favorites().contains(shopId);
+                bumpPlayerGenerationLocked(playerUuid);
             }
             long now = Instant.now().getEpochSecond();
             return repository.setFavorite(playerUuid, shopId, favorite, now).thenApply(nothing -> {
@@ -184,6 +206,11 @@ public final class DiscoveryService {
     /** Called only after a successful teleport. Persistence remains bounded and asynchronous. */
     public CompletableFuture<Void> recordVisit(UUID playerUuid, UUID shopId) {
         long now = Instant.now().getEpochSecond();
+        synchronized (lock) {
+            if (playerCache.containsKey(playerUuid) || loads.containsKey(playerUuid)) {
+                bumpPlayerGenerationLocked(playerUuid);
+            }
+        }
         return repository.recordRecentVisit(playerUuid, shopId, now, RECENT_LIMIT).thenRun(() -> {
             synchronized (lock) {
                 PlayerDiscoveryData current = playerCache.get(playerUuid);
@@ -202,6 +229,9 @@ public final class DiscoveryService {
     }
 
     public void onShopDeleted(UUID shopId) {
+        synchronized (lock) {
+            invalidationGeneration++;
+        }
         Set<UUID> nextFeatured = new HashSet<>(featured);
         nextFeatured.remove(shopId);
         featured = Set.copyOf(nextFeatured);
@@ -219,10 +249,35 @@ public final class DiscoveryService {
         }
     }
 
+    public void unload(UUID playerUuid) {
+        synchronized (lock) {
+            bumpPlayerGenerationLocked(playerUuid);
+            playerCache.remove(playerUuid);
+            loads.remove(playerUuid);
+        }
+    }
+
+    int playerGenerationEntries() {
+        synchronized (lock) {
+            return playerGenerations.size();
+        }
+    }
+
+    private long playerGenerationLocked(UUID playerUuid) {
+        return playerGenerations.getOrDefault(playerUuid, 0L);
+    }
+
+    private void bumpPlayerGenerationLocked(UUID playerUuid) {
+        playerGenerations.put(playerUuid, playerGenerationLocked(playerUuid) + 1L);
+    }
+
     private void trimPlayerCacheLocked() {
         while (playerCache.size() > PLAYER_CACHE_LIMIT) {
             UUID eldest = playerCache.keySet().iterator().next();
             playerCache.remove(eldest);
+            if (!loads.containsKey(eldest)) {
+                playerGenerations.remove(eldest);
+            }
         }
     }
 }

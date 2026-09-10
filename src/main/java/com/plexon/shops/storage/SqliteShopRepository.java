@@ -97,6 +97,13 @@ public final class SqliteShopRepository implements ShopRepository {
                 Files.createDirectories(databaseFile.toPath().toAbsolutePath().getParent());
                 Class.forName("org.sqlite.JDBC");
                 previousVersion = preflightSchemaVersion();
+                if (previousVersion > SCHEMA_VERSION) {
+                    throw new StorageException(
+                            "Database schema v" + previousVersion + " is newer than supported v" + SCHEMA_VERSION
+                                    + "; refusing to start or rewrite schema metadata",
+                            null
+                    );
+                }
                 if (existingDatabase && previousVersion < SCHEMA_VERSION) {
                     backupFile = backupBeforeMigration();
                 }
