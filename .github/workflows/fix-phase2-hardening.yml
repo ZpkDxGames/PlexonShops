@@ -1,0 +1,97 @@
+name: Fix Phase 2 Hardening Bootstrap
+
+on:
+  push:
+    branches:
+      - phase2/3.0.0-premium-discovery
+
+permissions:
+  contents: write
+
+jobs:
+  fix-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Correct bootstrap templates
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/phase2-hardening.yml')
+          text = path.read_text(encoding='utf-8')
+
+          old = '''                    throw new StorageException(
+                            "Database schema v" + previousVersion + " is newer than supported v" + SCHEMA_VERSION
+                                    + "; refusing to start or rewrite schema metadata"
+                    );'''
+          new = '''                    throw new StorageException(
+                            "Database schema v" + previousVersion + " is newer than supported v" + SCHEMA_VERSION
+                                    + "; refusing to start or rewrite schema metadata",
+                            null
+                    );'''
+          if old not in text:
+              raise SystemExit('StorageException bootstrap anchor missing')
+          text = text.replace(old, new, 1)
+
+          lines = []
+          token_placeholders = 0
+          for line in text.splitlines():
+              if 'name: PlexonShops-' in line and 'steps.evidence.outputs.version' in line:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  line = indent + 'name: PlexonShops-3.0.0-rc.1-candidate'
+              elif 'build/libs/PlexonShops-' in line and 'steps.evidence.outputs.version' in line:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  line = indent + 'build/libs/PlexonShops-3.0.0-rc.1.jar'
+              if 'GH_TOKEN:' in line and 'github.token' in line:
+                  indent = line[:len(line) - len(line.lstrip())]
+                  line = indent + 'GH_TOKEN: __GITHUB_TOKEN_EXPRESSION__'
+                  token_placeholders += 1
+              lines.append(line)
+          text = '\n'.join(lines) + '\n'
+          if token_placeholders != 3:
+              raise SystemExit(f'Expected 3 nested token expressions, replaced {token_placeholders}')
+
+          anchor = "          EOF\n\n      - name: Run full hardened candidate verification"
+          insertion = """          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          literal = '$' + '{{ github.token }}'
+          for raw in ('.github/workflows/publish-rc.yml', '.github/workflows/postverify-rc.yml'):
+              generated = Path(raw)
+              payload = generated.read_text(encoding='utf-8')
+              if '__GITHUB_TOKEN_EXPRESSION__' not in payload:
+                  raise SystemExit(f'Nested token placeholder missing in {raw}')
+              generated.write_text(payload.replace('__GITHUB_TOKEN_EXPRESSION__', literal), encoding='utf-8')
+          PY
+
+      - name: Run full hardened candidate verification"""
+          if anchor not in text:
+              raise SystemExit('Generated-workflow insertion anchor missing')
+          text = text.replace(anchor, insertion, 1)
+
+          text = text.replace(
+              "          rm .github/workflows/phase2-hardening.yml\n",
+              "          rm .github/workflows/phase2-hardening.yml\n          rm -f src/test/java/com/plexon/shops/config/.gitkeep\n",
+              1,
+          )
+
+          path.write_text(text, encoding='utf-8')
+          PY
+      - name: Commit corrected bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/fix-phase2-hardening.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: correct Phase 2 hardening bootstrap'
+          git push origin HEAD:phase2/3.0.0-premium-discovery
