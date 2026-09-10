@@ -1,5 +1,5 @@
-# PlexonShops 2.0.0
-# Runtime database work is always executed away from the server thread.
+# PlexonShops 3.0.0 Phase 2
+# Candidate configuration is validated completely before activation. Invalid reloads preserve the known-good runtime.
 
 database:
   file: "shops.db"
@@ -67,6 +67,55 @@ chat-prompts:
   timeout-seconds: 60
 
 guis:
+  discovery-hub:
+    size: 27
+    slots:
+      featured: 10
+      browse: 11
+      categories: 12
+      search: 13
+      favorites: 14
+      recent: 15
+      my-shop: 16
+      help: 22
+      admin-or-close: 26
+  discovery-browse:
+    size: 54
+    content-slots: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
+    slots:
+      home: 8
+      previous: 45
+      page: 49
+      search: 50
+      next: 53
+  shop-profile:
+    size: 27
+    slots:
+      info: 4
+      teleport: 10
+      favorite: 12
+      rate: 14
+      context: 16
+      back: 22
+      home: 26
+  discovery-list:
+    size: 54
+    content-slots: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
+    slots:
+      previous: 45
+      home: 49
+      next: 53
+  admin-profile:
+    size: 27
+    slots:
+      info: 4
+      featured: 10
+      status: 12
+      profile: 14
+      diagnostic: 16
+      back: 22
+
+  # Mature 2.x owner-management layouts remain valid compatibility surfaces.
   directory:
     size: 54
     content-slots: [9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44]
