@@ -26,17 +26,10 @@ jobs:
           path = Path('.github/workflows/phase2-hardening.yml')
           text = path.read_text(encoding='utf-8')
 
-          old = '''                    throw new StorageException(
-                            "Database schema v" + previousVersion + " is newer than supported v" + SCHEMA_VERSION
-                                    + "; refusing to start or rewrite schema metadata"
-                    );'''
-          new = '''                    throw new StorageException(
-                            "Database schema v" + previousVersion + " is newer than supported v" + SCHEMA_VERSION
-                                    + "; refusing to start or rewrite schema metadata",
-                            null
-                    );'''
+          old = r'''                                    + "; refusing to start or rewrite schema metadata"\n                    );\n'''
+          new = r'''                                    + "; refusing to start or rewrite schema metadata",\n                            null\n                    );\n'''
           if old not in text:
-              raise SystemExit('StorageException bootstrap anchor missing')
+              raise SystemExit('Escaped StorageException bootstrap anchor missing')
           text = text.replace(old, new, 1)
 
           lines = []
