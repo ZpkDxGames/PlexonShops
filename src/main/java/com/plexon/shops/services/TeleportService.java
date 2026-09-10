@@ -19,16 +19,20 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
+import java.util.logging.Level;
 
-/** Cancellable boss-bar warmups followed by Paper asynchronous teleports. */
+/** Cancellable warmups coordinated by one shared task, followed by Paper asynchronous teleports. */
 public final class TeleportService {
     private final JavaPlugin plugin;
     private final ShopService shops;
+    private final DiscoveryService discovery;
+    private final ShopAvailabilityResolver availability;
     private final VaultEconomyHook economy;
     private final Supplier<PluginConfig> config;
     private final Supplier<MessageService> messages;
@@ -40,12 +44,16 @@ public final class TeleportService {
     public TeleportService(
             JavaPlugin plugin,
             ShopService shops,
+            DiscoveryService discovery,
+            ShopAvailabilityResolver availability,
             VaultEconomyHook economy,
             Supplier<PluginConfig> config,
             Supplier<MessageService> messages
     ) {
         this.plugin = plugin;
         this.shops = shops;
+        this.discovery = discovery;
+        this.availability = availability;
         this.economy = economy;
         this.config = config;
         this.messages = messages;
@@ -75,17 +83,9 @@ public final class TeleportService {
             messages.get().send(player, "shop-not-found");
             return;
         }
-        if (shop.status() != ShopStatus.OPEN) {
-            messages.get().send(player, "shop-closed", statusResolver(shop.status()));
-            return;
-        }
-        Location destination = shop.location().resolve().orElse(null);
-        if (destination == null || destination.getWorld() == null) {
-            messages.get().send(player, "teleport-failed");
-            return;
-        }
-        if (settings.isWorldBlacklisted(destination.getWorld().getName())) {
-            messages.get().send(player, "invalid-world");
+        ShopAvailabilityResolver.Resolution resolved = availability.resolve(shop);
+        if (!resolved.teleportable()) {
+            sendUnavailable(player, shop, resolved);
             return;
         }
         if (!bypassesCooldown(player, shop, settings.teleport())) {
@@ -114,11 +114,6 @@ public final class TeleportService {
 
         long startedAt = System.nanoTime();
         long durationNanos = warmup * 1_000_000_000L;
-        BukkitTask completion = Bukkit.getScheduler().runTaskLater(
-                plugin,
-                () -> execute(player, shop.id()),
-                warmup * 20L
-        );
         pending.put(player.getUniqueId(), new PendingTeleport(
                 shop.id(),
                 shop.name(),
@@ -128,12 +123,9 @@ public final class TeleportService {
                 start.getZ(),
                 startedAt,
                 durationNanos,
-                completion,
                 bossBar
         ));
-        if (bossBar != null) {
-            ensureProgressCoordinator(settings.teleport().bossBar().updateIntervalTicks());
-        }
+        ensureProgressCoordinator(settings.teleport().bossBar().updateIntervalTicks());
         messages.get().send(player, "teleport-start",
                 messages.get().storedTag("shop", shop.name()),
                 Placeholder.unparsed("seconds", Integer.toString(warmup)));
@@ -174,7 +166,6 @@ public final class TeleportService {
     }
 
     private void execute(Player player, UUID shopId) {
-        clearPending(player.getUniqueId());
         if (!player.isOnline()) {
             return;
         }
@@ -183,17 +174,13 @@ public final class TeleportService {
             messages.get().send(player, "shop-not-found");
             return;
         }
-        if (shop.status() != ShopStatus.OPEN) {
-            messages.get().send(player, "shop-closed", statusResolver(shop.status()));
+        ShopAvailabilityResolver.Resolution resolved = availability.resolve(shop);
+        if (!resolved.teleportable()) {
+            sendUnavailable(player, shop, resolved);
             return;
         }
+        Location destination = resolved.destination();
         PluginConfig settings = config.get();
-        Location destination = shop.location().resolve().orElse(null);
-        if (destination == null || destination.getWorld() == null
-                || settings.isWorldBlacklisted(destination.getWorld().getName())) {
-            messages.get().send(player, "teleport-failed");
-            return;
-        }
 
         boolean feeBypass = player.hasPermission("plexonshops.teleport.fee.bypass")
                 || (settings.teleport().ownersBypassFee() && shop.ownerUuid().equals(player.getUniqueId()));
@@ -216,7 +203,14 @@ public final class TeleportService {
                 messages.get().send(player, "teleport-failed");
                 return;
             }
-            shops.recordVisit(shop.id(), player.getUniqueId());
+            shops.recordVisit(shop.id(), player.getUniqueId()).exceptionally(recordError -> {
+                plugin.getLogger().log(Level.WARNING, "Could not persist authoritative shop visit for " + shop.id(), recordError);
+                return null;
+            });
+            discovery.recordVisit(player.getUniqueId(), shop.id()).exceptionally(recordError -> {
+                plugin.getLogger().log(Level.WARNING, "Could not persist recent shop history for " + shop.id(), recordError);
+                return null;
+            });
             if (!bypassesCooldown(player, shop, settings.teleport()) && settings.teleport().cooldownSeconds() > 0) {
                 cooldowns.put(player.getUniqueId(),
                         System.nanoTime() + settings.teleport().cooldownSeconds() * 1_000_000_000L);
@@ -237,42 +231,55 @@ public final class TeleportService {
         }
         stopProgressCoordinator();
         coordinatorIntervalTicks = interval;
-        progressCoordinator = Bukkit.getScheduler().runTaskTimer(
-                plugin,
-                this::updateBossBars,
-                1L,
-                interval
-        );
+        progressCoordinator = Bukkit.getScheduler().runTaskTimer(plugin, this::tickCoordinator, 1L, interval);
     }
 
-    private void updateBossBars() {
+    private void tickCoordinator() {
         long now = System.nanoTime();
+        List<UUID> due = new ArrayList<>();
         for (Map.Entry<UUID, PendingTeleport> entry : pending.entrySet()) {
             UUID playerUuid = entry.getKey();
             PendingTeleport active = entry.getValue();
-            if (active.bossBar() == null) {
-                continue;
-            }
             Player player = Bukkit.getPlayer(playerUuid);
             if (player == null || !player.isOnline()) {
                 cancel(playerUuid, (String) null);
                 continue;
             }
-            long remainingNanos = Math.max(0L, active.durationNanos() - (now - active.startedAtNanos()));
-            float progress = (float) Math.clamp(
-                    remainingNanos / (double) active.durationNanos(),
-                    0.0D,
-                    1.0D
-            );
-            long seconds = Math.max(1L, (remainingNanos + 999_999_999L) / 1_000_000_000L);
-            active.bossBar().progress(progress);
-            active.bossBar().name(messages.get().get(
-                    "teleport-bossbar",
-                    messages.get().storedTag("shop", active.shopDisplayName()),
-                    Placeholder.unparsed("seconds", Long.toString(seconds))
-            ));
+            long remainingNanos = active.durationNanos() - (now - active.startedAtNanos());
+            if (remainingNanos <= 0L) {
+                due.add(playerUuid);
+                continue;
+            }
+            if (active.bossBar() != null) {
+                float progress = (float) Math.clamp(
+                        remainingNanos / (double) active.durationNanos(),
+                        0.0D,
+                        1.0D
+                );
+                long seconds = Math.max(1L, (remainingNanos + 999_999_999L) / 1_000_000_000L);
+                active.bossBar().progress(progress);
+                active.bossBar().name(messages.get().get(
+                        "teleport-bossbar",
+                        messages.get().storedTag("shop", active.shopDisplayName()),
+                        Placeholder.unparsed("seconds", Long.toString(seconds))
+                ));
+            }
+        }
+        for (UUID playerUuid : due) {
+            completeWarmup(playerUuid);
         }
         stopProgressCoordinatorIfIdle();
+    }
+
+    private void completeWarmup(UUID playerUuid) {
+        PendingTeleport active = clearPending(playerUuid);
+        if (active == null) {
+            return;
+        }
+        Player player = Bukkit.getPlayer(playerUuid);
+        if (player != null && player.isOnline()) {
+            execute(player, active.shopId());
+        }
     }
 
     private BossBar createBossBar(Shop shop, int seconds, PluginConfig.TeleportBossBar settings) {
@@ -341,21 +348,15 @@ public final class TeleportService {
         if (removed == null) {
             return null;
         }
-        removed.completionTask().cancel();
         Player player = Bukkit.getPlayer(playerUuid);
         if (player != null && removed.bossBar() != null) {
             player.hideBossBar(removed.bossBar());
         }
-        stopProgressCoordinatorIfIdle();
         return removed;
     }
 
     private void stopProgressCoordinatorIfIdle() {
-        if (progressCoordinator == null) {
-            return;
-        }
-        boolean bossBarPending = pending.values().stream().anyMatch(active -> active.bossBar() != null);
-        if (!bossBarPending) {
+        if (progressCoordinator != null && pending.isEmpty()) {
             stopProgressCoordinator();
         }
     }
@@ -366,6 +367,15 @@ public final class TeleportService {
             progressCoordinator = null;
         }
         coordinatorIntervalTicks = 0;
+    }
+
+    private void sendUnavailable(Player player, Shop shop, ShopAvailabilityResolver.Resolution resolved) {
+        if (resolved.state() == ShopAvailabilityResolver.State.CLOSED
+                || resolved.state() == ShopAvailabilityResolver.State.MAINTENANCE) {
+            messages.get().send(player, "shop-closed", statusResolver(shop.status()));
+        } else {
+            messages.get().send(player, "teleport-failed");
+        }
     }
 
     private TagResolver statusResolver(ShopStatus status) {
@@ -393,7 +403,6 @@ public final class TeleportService {
             double z,
             long startedAtNanos,
             long durationNanos,
-            BukkitTask completionTask,
             BossBar bossBar
     ) {
     }

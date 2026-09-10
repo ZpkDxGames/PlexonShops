@@ -27,7 +27,12 @@ public final class ShopAvailabilityResolver {
         if (shop.status() == ShopStatus.MAINTENANCE) {
             return unavailable(State.MAINTENANCE, "maintenance");
         }
-        if (shop.location() == null || !shop.location().hasFiniteCoordinates()) {
+        return resolveDestination(shop);
+    }
+
+    /** Validates only the persisted destination, allowing owner/admin status changes to share one policy. */
+    public Resolution resolveDestination(Shop shop) {
+        if (shop == null || shop.location() == null || !shop.location().hasFiniteCoordinates()) {
             return unavailable(State.UNAVAILABLE, "invalid-coordinates");
         }
         Location destination = shop.location().resolve().orElse(null);
