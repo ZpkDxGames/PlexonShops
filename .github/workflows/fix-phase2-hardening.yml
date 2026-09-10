@@ -58,27 +58,32 @@ jobs:
               raise SystemExit(f'Expected 3 nested token expressions, replaced {token_placeholders}')
 
           anchor = "          EOF\n\n      - name: Run full hardened candidate verification"
-          insertion = """          EOF
-
-          python3 - <<'PY'
-          from pathlib import Path
-          literal = '$' + '{{ github.token }}'
-          for raw in ('.github/workflows/publish-rc.yml', '.github/workflows/postverify-rc.yml'):
-              generated = Path(raw)
-              payload = generated.read_text(encoding='utf-8')
-              if '__GITHUB_TOKEN_EXPRESSION__' not in payload:
-                  raise SystemExit(f'Nested token placeholder missing in {raw}')
-              generated.write_text(payload.replace('__GITHUB_TOKEN_EXPRESSION__', literal), encoding='utf-8')
-          PY
-
-      - name: Run full hardened candidate verification"""
+          injected = [
+              "          EOF",
+              "",
+              "          python3 - <<'PY'",
+              "          from pathlib import Path",
+              "          literal = '$' + '{{ github.token }}'",
+              "          for raw in ('.github/workflows/publish-rc.yml', '.github/workflows/postverify-rc.yml'):",
+              "              generated = Path(raw)",
+              "              payload = generated.read_text(encoding='utf-8')",
+              "              if '__GITHUB_TOKEN_EXPRESSION__' not in payload:",
+              "                  raise SystemExit(f'Nested token placeholder missing in {raw}')",
+              "              generated.write_text(payload.replace('__GITHUB_TOKEN_EXPRESSION__', literal), encoding='utf-8')",
+              "          PY",
+              "",
+              "      - name: Run full hardened candidate verification",
+          ]
           if anchor not in text:
               raise SystemExit('Generated-workflow insertion anchor missing')
-          text = text.replace(anchor, insertion, 1)
+          text = text.replace(anchor, '\n'.join(injected), 1)
 
+          cleanup = "          rm .github/workflows/phase2-hardening.yml\n"
+          if cleanup not in text:
+              raise SystemExit('Bootstrap cleanup anchor missing')
           text = text.replace(
-              "          rm .github/workflows/phase2-hardening.yml\n",
-              "          rm .github/workflows/phase2-hardening.yml\n          rm -f src/test/java/com/plexon/shops/config/.gitkeep\n",
+              cleanup,
+              cleanup + "          rm -f src/test/java/com/plexon/shops/config/.gitkeep\n",
               1,
           )
 
