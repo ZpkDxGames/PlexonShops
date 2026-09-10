@@ -37,63 +37,102 @@ jobs:
           mvn -B -ntp org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
             -Dfile="${core_jar}" -DgroupId=com.zpkdxgames -DartifactId=PlexonCore \
             -Dversion=2.0.4 -Dpackaging=jar -DgeneratePom=true
-      - name: Verify and package
+      - name: Full candidate verification
         run: ./gradlew --no-daemon clean test check javadoc shadowJar verifyDistribution --stacktrace
-      - name: Verify candidate contract
-        id: release_contract
+      - name: Build exact-head evidence
+        id: evidence
         shell: bash
         run: |
           set -euo pipefail
           VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
           test "$VERSION" = "3.0.0-rc.1"
-          jar_path="build/libs/PlexonShops-${VERSION}.jar"
-          test -s "${jar_path}"
-          jar tf "${jar_path}" > build/jar-contents.txt
-          grep -qx 'plugin.yml' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/api/PlexonShopsAPI.class' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/api/AvailabilityView.class' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/services/DiscoveryService.class' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/services/ShopAvailabilityResolver.class' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/event/PlexonShopCreatedEvent.class' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/event/PlexonShopVisitedEvent.class' build/jar-contents.txt
-          grep -qx 'com/plexon/shops/event/PlexonShopRatedEvent.class' build/jar-contents.txt
-          for prefix in 'com/zpkdxgames/plexoncore/' 'net/milkbowl/vault/' 'me/clip/placeholderapi/'; do
-            if grep -q "^${prefix}" build/jar-contents.txt; then
-              echo "Forbidden compile-only dependency shaded into PlexonShops: ${prefix}" >&2
+          JAR="build/libs/PlexonShops-${VERSION}.jar"
+          test -s "$JAR"
+          mkdir -p build/release
+          jar tf "$JAR" > build/release/JAR_CONTENTS.txt
+
+          for entry in \
+            plugin.yml config.yml messages.yml \
+            com/plexon/shops/PlexonShops.class \
+            com/plexon/shops/api/PlexonShopsAPI.class \
+            com/plexon/shops/api/AvailabilityView.class \
+            com/plexon/shops/services/DiscoveryService.class \
+            com/plexon/shops/services/TeleportAttemptRegistry.class \
+            com/plexon/shops/services/ShopAvailabilityResolver.class \
+            com/plexon/shops/event/PlexonShopCreatedEvent.class \
+            com/plexon/shops/event/PlexonShopVisitedEvent.class \
+            com/plexon/shops/event/PlexonShopRatedEvent.class \
+            com/zaxxer/hikari/HikariDataSource.class \
+            org/sqlite/JDBC.class \
+            META-INF/THIRD_PARTY_NOTICES.md; do
+            grep -qx "$entry" build/release/JAR_CONTENTS.txt
+          done
+
+          for prefix in \
+            'com/zpkdxgames/plexoncore/' \
+            'net/milkbowl/vault/' \
+            'me/clip/placeholderapi/' \
+            'org/bukkit/' \
+            'io/papermc/paper/' \
+            'net/kyori/adventure/' \
+            'net/luckperms/api/'; do
+            if grep -q "^${prefix}" build/release/JAR_CONTENTS.txt; then
+              echo "Forbidden provided API shaded into PlexonShops: ${prefix}" >&2
               exit 1
             fi
           done
-          unzip -p "${jar_path}" plugin.yml | sed -n 's/^version:[[:space:]]*//p' | head -n 1 | tr -d " '\"\r" | grep -qx "${VERSION}"
-          javap -verbose -classpath "${jar_path}" com.plexon.shops.PlexonShops | grep -q 'major version: 69'
-          mkdir -p build/release
+
+          unzip -p "$JAR" plugin.yml \
+            | sed -n 's/^version:[[:space:]]*//p' \
+            | head -n 1 | tr -d " '\"\r" | grep -qx "$VERSION"
+          javap -verbose -classpath "$JAR" com.plexon.shops.PlexonShops | grep -q 'major version: 69'
+
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+          totals = dict(executed=0, failures=0, errors=0, skipped=0)
+          paths = glob.glob('build/test-results/test/TEST-*.xml')
+          if not paths:
+              raise SystemExit('No JUnit XML results found')
+          for path in paths:
+              root = ET.parse(path).getroot()
+              totals['executed'] += int(root.attrib.get('tests', 0))
+              totals['failures'] += int(root.attrib.get('failures', 0))
+              totals['errors'] += int(root.attrib.get('errors', 0))
+              totals['skipped'] += int(root.attrib.get('skipped', 0))
+          if totals['executed'] <= 17:
+              raise SystemExit(f"Expanded Phase 2 suite did not exceed legacy 17-test evidence: {totals['executed']}")
+          if any(totals[key] for key in ('failures', 'errors', 'skipped')):
+              raise SystemExit(f'Non-clean test totals: {totals}')
+          with open('build/release/TEST_SUMMARY.txt', 'w', encoding='utf-8') as out:
+              for key in ('executed', 'failures', 'errors', 'skipped'):
+                  out.write(f'{key}={totals[key]}\n')
+          PY
+
           (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar" > ../release/SHA256SUMS.txt)
           (cd build/libs && sha256sum --check ../release/SHA256SUMS.txt)
-          python3 - <<'PY'
-          import glob, xml.etree.ElementTree as ET
-          totals = dict(tests=0, failures=0, errors=0, skipped=0)
-          for path in glob.glob('build/test-results/test/TEST-*.xml'):
-              root = ET.parse(path).getroot()
-              for key in totals:
-                  totals[key] += int(root.attrib.get(key, 0))
-          with open('build/release/TEST_SUMMARY.txt', 'w', encoding='utf-8') as out:
-              out.write(f"Tests: {totals['tests']} executed / {totals['failures']} failures / {totals['errors']} errors / {totals['skipped']} skipped\n")
-          PY
           cat > build/release/PROVENANCE.txt <<EOF
-          Repository: ZpkDxGames/PlexonShops
-          Version: ${VERSION}
-          Commit: ${GITHUB_SHA}
-          Java: 25
-          Candidate: v${VERSION}
+          repository=ZpkDxGames/PlexonShops
+          commit=${GITHUB_SHA}
+          version=${VERSION}
+          java_major=69
+          plexoncore=2.0.4
+          rollback_tag=v2.2.1
+          rollback_commit=81c77e936194de2d46fd40221ea57a1f65c07b34
+          runtime_certification=NOT_EXECUTED
           EOF
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-      - name: Check whitespace
+          echo "jar=${JAR}" >> "$GITHUB_OUTPUT"
+          echo "jar_size=$(stat -c%s "$JAR")" >> "$GITHUB_OUTPUT"
+          echo "jar_sha256=$(sha256sum "$JAR" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Check source whitespace
         run: git diff --check origin/main...HEAD
-      - name: Upload verified artifact
+      - name: Upload exact-head candidate artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PlexonShops-${{ steps.release_contract.outputs.version }}-${{ github.sha }}
+          name: PlexonShops-${{ steps.evidence.outputs.version }}-${{ github.sha }}
           path: |
-            build/libs/PlexonShops-${{ steps.release_contract.outputs.version }}.jar
+            build/libs/PlexonShops-${{ steps.evidence.outputs.version }}.jar
             build/release/SHA256SUMS.txt
             build/release/TEST_SUMMARY.txt
             build/release/PROVENANCE.txt
