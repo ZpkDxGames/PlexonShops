@@ -2,6 +2,20 @@
 
 All notable changes to PlexonShops are documented here.
 
+## 3.0.0 - 2026-09-11
+
+- Promotes the accepted Phase 2 / Phase 3 player-shop directory line and final RC2 UX to stable `3.0.0`.
+- Preserves DynamicShop as the server-owned item buy/sell authority; PlexonShops remains responsible only for player-owned shop discovery, profiles, favorites, ratings, showcase presentation, owner listing management, safe visits, and teleport fee/refund orchestration.
+- Preserves generation-guarded discovery loads, cached/paginated directory views, serialized per-shop mutation chains, bounded SQLite work, schema-3 migration safety, coalesced visit persistence, and the shared teleport warmup coordinator.
+- Fixes a paid-teleport settlement race: logout now cancels only a pending warmup and cannot refund/revoke an already-started `teleportAsync`; the async terminal result remains authoritative for refund or successful visit/cooldown settlement.
+- Suppresses player-facing completion effects/messages after an async teleport finishes for a player who is already offline, while still completing authoritative transaction state.
+- Adds focused regression coverage for the logout/in-flight settlement invariant.
+- Promotes the project/build metadata to stable `3.0.0` and replaces RC-specific publication with one exact-current-`main` stable release workflow.
+- Stable publication now rebuilds/retests exact final `main`, publishes JAR/checksum/test/provenance evidence, downloads the published assets, and verifies checksum plus exact source/lineage provenance before completion.
+- Removes the obsolete one-off Phase 3 RC2 publisher.
+- Live PlexonCraft migration/teleport/economy/Spark/soak certification remains a deployment follow-up and may be recorded as `NOT_EXECUTED` in release provenance.
+- Rollback baseline: `v2.2.1` / `81c77e936194de2d46fd40221ea57a1f65c07b34`.
+
 ## 2.2.0 - 2026-09-09
 
 - Reworked marketplace directory reads around generation-cached indexes so category/filter ordering is rebuilt only when directory-relevant shop state changes.
