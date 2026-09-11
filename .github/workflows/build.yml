@@ -137,7 +137,7 @@ jobs:
           PY
 
           (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar") > build/release/SHA256SUMS.txt
-          (cd build/release && sha256sum --check SHA256SUMS.txt --ignore-missing)
+          (cd build/libs && sha256sum --check ../release/SHA256SUMS.txt)
           echo "jar_size=$(stat -c%s "$JAR")" >> "$GITHUB_OUTPUT"
           echo "jar_sha256=$(sha256sum "$JAR" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
