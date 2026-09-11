@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.plexon"
-version = "2.2.1"
+version = "3.0.0-rc.2"
 
 val pluginVersion = version.toString()
 
@@ -109,7 +109,7 @@ val shadowJar = tasks.register<Jar>("shadowJar") {
 
 val verifyDistribution = tasks.register("verifyDistribution") {
     group = "verification"
-    description = "Checks the installable JAR contract and verifies PlexonCore is not shaded."
+    description = "Checks the installable JAR contract and dependency isolation."
     dependsOn(shadowJar)
     inputs.file(shadowJar.flatMap { it.archiveFile })
         .withPropertyName("distributionJar")
@@ -128,12 +128,21 @@ val verifyDistribution = tasks.register("verifyDistribution") {
                 "com/plexon/shops/event/PlexonShopCreatedEvent.class",
                 "com/plexon/shops/event/PlexonShopVisitedEvent.class",
                 "com/plexon/shops/event/PlexonShopRatedEvent.class",
+                "com/plexon/shops/services/ShopAvailabilityResolver.class",
+                "com/plexon/shops/services/DiscoveryService.class",
+                "com/plexon/shops/services/ConfirmationService.class",
                 "com/zaxxer/hikari/HikariDataSource.class",
                 "org/sqlite/JDBC.class",
                 "META-INF/THIRD_PARTY_NOTICES.md"
             ).forEach { entry -> require(zip.getEntry(entry) != null) { "Missing JAR entry: $entry" } }
             require(zip.entries().asSequence().none { it.name.startsWith("com/zpkdxgames/plexoncore/") }) {
                 "PlexonCore runtime classes must not be shaded into PlexonShops"
+            }
+            require(zip.entries().asSequence().none { it.name.startsWith("net/milkbowl/vault/") }) {
+                "Vault runtime/API classes must not be shaded into PlexonShops"
+            }
+            require(zip.entries().asSequence().none { it.name.startsWith("me/clip/placeholderapi/") }) {
+                "PlaceholderAPI runtime/API classes must not be shaded into PlexonShops"
             }
         }
     }

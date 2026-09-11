@@ -5,22 +5,28 @@ import com.plexon.shops.api.PlexonShopsAPI;
 import com.plexon.shops.commands.PlexonShopsCommand;
 import com.plexon.shops.config.PluginConfig;
 import com.plexon.shops.event.ShopEventPublisher;
+import com.plexon.shops.gui.DiscoveryGuiManager;
 import com.plexon.shops.gui.GuiManager;
 import com.plexon.shops.integration.core.CoreBridge;
 import com.plexon.shops.integration.core.CoreBridgeFactory;
 import com.plexon.shops.integrations.PlexonShopsExpansion;
 import com.plexon.shops.integrations.VaultEconomyHook;
+import com.plexon.shops.listeners.DiscoveryGuiListener;
 import com.plexon.shops.listeners.GuiListener;
 import com.plexon.shops.listeners.OwnerActivityListener;
 import com.plexon.shops.listeners.TeleportListener;
 import com.plexon.shops.messages.MessageService;
 import com.plexon.shops.models.Shop;
 import com.plexon.shops.services.ChatPromptService;
+import com.plexon.shops.services.ConfirmationService;
+import com.plexon.shops.services.DiscoveryService;
+import com.plexon.shops.services.ShopAvailabilityResolver;
 import com.plexon.shops.services.ShopCache;
 import com.plexon.shops.services.ShopService;
 import com.plexon.shops.services.TeleportService;
 import com.plexon.shops.storage.ShopRepository;
 import com.plexon.shops.storage.SqliteShopRepository;
+import com.plexon.shops.storage.StorageDiagnostics;
 import com.plexon.shops.util.BoundedExecutor;
 import com.plexon.shops.util.MainThread;
 import org.bukkit.Bukkit;
@@ -45,10 +51,14 @@ public final class PlexonShops extends JavaPlugin {
     private BoundedExecutor worker;
     private ShopRepository repository;
     private ShopService shops;
+    private DiscoveryService discovery;
+    private ShopAvailabilityResolver availability;
+    private ConfirmationService confirmations;
     private ChatPromptService prompts;
     private TeleportService teleports;
     private VaultEconomyHook economy;
     private GuiManager guis;
+    private DiscoveryGuiManager discoveryGuis;
     private PlexonShopsExpansion expansion;
     private PlexonShopsAPI publicApi;
     private CoreBridge coreBridge;
@@ -83,11 +93,16 @@ public final class PlexonShops extends JavaPlugin {
             ShopCache cache = new ShopCache();
             ShopEventPublisher eventPublisher = new ShopEventPublisher(this);
             shops = new ShopService(cache, repository, runtimeConfig::get, getLogger(), eventPublisher);
+            discovery = new DiscoveryService(repository, shops, getLogger());
+            availability = new ShopAvailabilityResolver(runtimeConfig::get);
+            confirmations = new ConfirmationService(Duration.ofSeconds(30));
             economy = new VaultEconomyHook(this, runtimeConfig::get);
             prompts = new ChatPromptService(this, runtimeConfig::get, messageService::get);
             teleports = new TeleportService(
                     this,
                     shops,
+                    discovery,
+                    availability,
                     economy,
                     runtimeConfig::get,
                     messageService::get
@@ -98,6 +113,18 @@ public final class PlexonShops extends JavaPlugin {
                     teleports,
                     prompts,
                     economy,
+                    runtimeConfig::get,
+                    messageService::get
+            );
+            discoveryGuis = new DiscoveryGuiManager(
+                    this,
+                    shops,
+                    discovery,
+                    availability,
+                    teleports,
+                    prompts,
+                    economy,
+                    guis,
                     runtimeConfig::get,
                     messageService::get
             );
@@ -122,6 +149,9 @@ public final class PlexonShops extends JavaPlugin {
         }
         if (teleports != null) {
             teleports.cancelAll();
+        }
+        if (confirmations != null) {
+            confirmations.clearAll();
         }
         if (expansion != null) {
             expansion.unregister();
@@ -167,7 +197,7 @@ public final class PlexonShops extends JavaPlugin {
 
     /** Low-overhead operational snapshot used by /pshops diagnostics. */
     public DiagnosticsSnapshot diagnostics() {
-        if (!ready || shops == null || teleports == null || worker == null) {
+        if (!ready || shops == null || teleports == null || worker == null || discovery == null || repository == null) {
             throw new IllegalStateException("PlexonShops is not ready");
         }
         BoundedExecutor.ExecutorMetrics executor = worker.metrics();
@@ -191,7 +221,11 @@ public final class PlexonShops extends JavaPlugin {
                 economy != null && economy.available(),
                 Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI"),
                 Bukkit.getPluginManager().isPluginEnabled("PlexonRanks"),
-                coreBridge == null ? "unavailable" : String.valueOf(coreBridge.mode())
+                coreBridge == null ? "unavailable" : String.valueOf(coreBridge.mode()),
+                discovery.featuredIds().size(),
+                discovery.playerCacheEntries(),
+                confirmations == null ? 0 : confirmations.pendingCount(),
+                repository.diagnostics()
         );
     }
 
@@ -231,6 +265,7 @@ public final class PlexonShops extends JavaPlugin {
     private void bootstrapStorage() {
         repository.initialize()
                 .thenCompose(ignored -> repository.loadAll())
+                .thenCompose(loaded -> discovery.initialize().thenApply(ignored -> loaded))
                 .whenComplete((loaded, error) -> Bukkit.getScheduler().runTask(this, () -> {
                     if (error != null) {
                         failed = true;
@@ -249,13 +284,15 @@ public final class PlexonShops extends JavaPlugin {
         registerPlaceholderExpansion();
         ready = true;
         publishHealth();
+        Bukkit.getOnlinePlayers().forEach(player -> discovery.preload(player.getUniqueId()));
+        StorageDiagnostics storage = repository.diagnostics();
         long inactive = shops.inactiveCount();
         getLogger().info("Loaded " + loaded.size() + " shops (" + inactive + " hidden by inactivity policy). Core mode: "
-                + coreBridge.mode() + ".");
+                + coreBridge.mode() + ". Schema: " + storage.schemaVersion() + " (" + storage.migrationStatus() + ").");
     }
 
     private void registerPublicApi() {
-        publicApi = new DefaultPlexonShopsAPI(shops);
+        publicApi = new DefaultPlexonShopsAPI(shops, discovery, availability);
         Bukkit.getServicesManager().register(PlexonShopsAPI.class, publicApi, this, ServicePriority.Normal);
     }
 
@@ -268,28 +305,40 @@ public final class PlexonShops extends JavaPlugin {
             coreBridge.markDegraded("Shop engine ready; Vault economy provider unavailable");
             return;
         }
-        coreBridge.markReady("Shop engine, SQLite, public API and shop events ready");
+        StorageDiagnostics storage = repository.diagnostics();
+        if (storage.schemaVersion() != SqliteShopRepository.SCHEMA_VERSION || storage.corruptRows() > 0) {
+            coreBridge.markDegraded("Shop engine ready; persistence diagnostics require attention");
+            return;
+        }
+        coreBridge.markReady("Shop engine, SQLite v3, discovery, public API and shop events ready");
     }
 
     private void registerCommands() {
         PluginCommand command = Objects.requireNonNull(getCommand("pshops"), "pshops command missing from plugin.yml");
-        PlexonShopsCommand executor = new PlexonShopsCommand(this, () -> guis, messageService::get);
+        PlexonShopsCommand executor = new PlexonShopsCommand(
+                this,
+                () -> guis,
+                () -> discoveryGuis,
+                messageService::get
+        );
         command.setExecutor(executor);
         command.setTabCompleter(executor);
     }
 
     private void registerListeners() {
         Bukkit.getPluginManager().registerEvents(prompts, this);
-        Bukkit.getPluginManager().registerEvents(new GuiListener(guis), this);
+        Bukkit.getPluginManager().registerEvents(new GuiListener(
+                guis, shops, confirmations, runtimeConfig::get, messageService::get), this);
+        Bukkit.getPluginManager().registerEvents(new DiscoveryGuiListener(discoveryGuis), this);
         Bukkit.getPluginManager().registerEvents(new TeleportListener(teleports), this);
-        Bukkit.getPluginManager().registerEvents(new OwnerActivityListener(shops), this);
+        Bukkit.getPluginManager().registerEvents(new OwnerActivityListener(shops, discovery), this);
     }
 
     private void registerPlaceholderExpansion() {
         if (!Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI")) {
             return;
         }
-        expansion = new PlexonShopsExpansion(this, shops);
+        expansion = new PlexonShopsExpansion(this, shops, discovery);
         if (!expansion.register()) {
             getLogger().warning("PlaceholderAPI rejected the PlexonShops expansion registration.");
             expansion = null;
@@ -322,7 +371,11 @@ public final class PlexonShops extends JavaPlugin {
             boolean vaultAvailable,
             boolean placeholderApiAvailable,
             boolean plexonRanksAvailable,
-            String coreMode
+            String coreMode,
+            int featuredShops,
+            int discoveryPlayerCacheEntries,
+            int pendingConfirmations,
+            StorageDiagnostics storage
     ) {
     }
 

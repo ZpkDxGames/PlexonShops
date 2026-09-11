@@ -1,56 +1,42 @@
 name: PlexonShops
 version: '${version}'
 main: com.plexon.shops.PlexonShops
-description: GUI-first player shop directory for the Plexon ecosystem.
-api-version: '26.2'
-load: POSTWORLD
-author: ZpkDxGames
-website: https://github.com/ZpkDxGames/PlexonShops
-softdepend:
-  - PlexonCore
-  - Vault
-  - PlaceholderAPI
+api-version: '1.21'
+authors: [ZpkDxGames]
+description: Premium player-shop discovery, management, ratings and safe teleportation for PlexonCraft.
+softdepend: [Vault, PlaceholderAPI, PlexonRanks, PlexonCore]
 
 commands:
   pshops:
-    description: Browse, manage, and diagnose Plexon player shops.
-    usage: /<command> [manage|diagnostics|reload]
-    aliases: [pshop, playershops]
+    description: Open PlexonShops discovery or management tools.
+    usage: /<command> [discover|browse|manage|admin|diagnostics|reload]
+    aliases: [pshop, playershops, shops]
 
 permissions:
   plexonshops.use:
-    description: Opens and uses the global player shops directory.
+    description: Open the player shop discovery interface.
     default: true
   plexonshops.create:
-    description: Creates and manages personal shops.
-    default: false
+    description: Create and manage owned shops.
+    default: true
   plexonshops.admin:
-    description: Grants every PlexonShops administrative capability.
+    description: Open administration and operational diagnostics.
     default: op
-    children:
-      plexonshops.use: true
-      plexonshops.create: true
-      plexonshops.reload: true
-      plexonshops.format: true
-      plexonshops.teleport.cooldown.bypass: true
-      plexonshops.teleport.fee.bypass: true
-      plexonshops.subshops.unlimited: true
-      plexonshops.limit.unlimited: true
   plexonshops.reload:
-    description: Reloads PlexonShops configuration and language files.
+    description: Reload candidate configuration and messages transactionally.
     default: op
   plexonshops.format:
-    description: Allows MiniMessage formatting in owned shop text.
+    description: Use supported formatting in player-authored shop text.
     default: op
-  plexonshops.limit.unlimited:
-    description: Legacy alias that bypasses the per-player shop limit.
-    default: false
-  plexonshops.subshops.unlimited:
-    description: Bypasses the per-player sub-shop limit.
-    default: false
   plexonshops.teleport.cooldown.bypass:
-    description: Bypasses the shop teleport cooldown.
+    description: Bypass shop teleport cooldowns.
     default: op
   plexonshops.teleport.fee.bypass:
-    description: Bypasses all shop teleport fees.
+    description: Bypass shop teleport fees.
+    default: op
+  plexonshops.limit.*:
+    description: Legacy total-shop limit override namespace.
+    default: false
+  plexonshops.subshops.*:
+    description: Additional sub-shop capacity override namespace.
     default: false

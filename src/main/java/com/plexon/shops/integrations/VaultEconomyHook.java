@@ -63,6 +63,12 @@ public final class VaultEconomyHook {
         }
     }
 
+    /** Read-only balance snapshot for player-facing teleport previews; never mutates economy state. */
+    public double balance(Player player) {
+        Economy current = economy;
+        return current == null ? Double.NaN : current.getBalance(player);
+    }
+
     public String format(double amount) {
         Economy current = economy;
         return current == null ? String.format(Locale.ROOT, "%.2f", amount) : current.format(amount);

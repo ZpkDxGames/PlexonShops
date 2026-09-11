@@ -1,0 +1,3 @@
+# PlexonShops 3.0.0 runtime certification
+
+Stable `v3.0.0` is blocked until PlexonCraft validates: representative 2.2.1 migration; discovery/browser/categories/search/filter; shop profile and owner management; OPEN/CLOSED/UNAVAILABLE behavior; successful teleport; duplicate warmup/in-flight rejection; movement/damage/logout cancellation; shop close/destination invalidation during warmup; Vault/Theosis charge/refund; visit publication only after successful teleport; stale discovery loads; restart persistence; invalid reload rollback; PlaceholderAPI; public API/events; PlexonCore/cross-plugin behavior; Spark/MSPT comparison; at least 30 minutes of soak; and zero HIGH/CRITICAL defects.

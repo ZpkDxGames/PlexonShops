@@ -1,6 +1,7 @@
 package com.plexon.shops.gui;
 
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Material;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
@@ -18,8 +19,8 @@ public final class ItemFactory {
         ItemStack item = base.clone();
         item.setAmount(1);
         ItemMeta meta = item.getItemMeta();
-        meta.displayName(name);
-        meta.lore(lore);
+        meta.displayName(name.decoration(TextDecoration.ITALIC, false));
+        meta.lore(lore.stream().map(line -> line.decoration(TextDecoration.ITALIC, false)).toList());
         meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES);
         meta.setEnchantmentGlintOverride(glow ? Boolean.TRUE : null);
         item.setItemMeta(meta);

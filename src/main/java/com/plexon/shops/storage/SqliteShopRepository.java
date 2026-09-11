@@ -15,7 +15,10 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import java.io.File;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -23,6 +26,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -35,6 +39,8 @@ import java.util.stream.Collectors;
 
 /** Transactional SQLite implementation. Every operation is dispatched to the bounded worker. */
 public final class SqliteShopRepository implements ShopRepository {
+    public static final int SCHEMA_VERSION = 3;
+
     private static final String UPSERT_SHOP = """
             INSERT INTO shops (
                 id, owner_uuid, owner_name, shop_name, world_uuid, world_name,
@@ -67,6 +73,7 @@ public final class SqliteShopRepository implements ShopRepository {
     private final BoundedExecutor executor;
     private final Logger logger;
     private volatile HikariDataSource dataSource;
+    private volatile StorageDiagnostics diagnostics = new StorageDiagnostics(0, "not-initialized", "", 0);
 
     public SqliteShopRepository(
             File databaseFile,
@@ -83,9 +90,23 @@ public final class SqliteShopRepository implements ShopRepository {
     @Override
     public CompletableFuture<Void> initialize() {
         return executor.run(() -> {
+            String backupFile = "";
+            int previousVersion = 0;
+            boolean existingDatabase = databaseFile.isFile() && databaseFile.length() > 0L;
             try {
                 Files.createDirectories(databaseFile.toPath().toAbsolutePath().getParent());
                 Class.forName("org.sqlite.JDBC");
+                previousVersion = preflightSchemaVersion();
+                if (previousVersion > SCHEMA_VERSION) {
+                    throw new StorageException(
+                            "Database schema v" + previousVersion + " is newer than supported v" + SCHEMA_VERSION
+                                    + "; refusing to start or rewrite schema metadata",
+                            null
+                    );
+                }
+                if (existingDatabase && previousVersion < SCHEMA_VERSION) {
+                    backupFile = backupBeforeMigration();
+                }
 
                 HikariConfig config = new HikariConfig();
                 config.setPoolName("PlexonShops-SQLite");
@@ -103,10 +124,32 @@ public final class SqliteShopRepository implements ShopRepository {
                     statement.execute("PRAGMA journal_mode = WAL");
                     statement.execute("PRAGMA synchronous = NORMAL");
                     statement.execute("PRAGMA busy_timeout = 5000");
-                    createSchema(statement);
+                    connection.setAutoCommit(false);
+                    try {
+                        createSchema(statement);
+                        writeSchemaVersion(connection, SCHEMA_VERSION);
+                        connection.commit();
+                    } catch (SQLException error) {
+                        rollback(connection, error);
+                        throw error;
+                    } finally {
+                        connection.setAutoCommit(true);
+                    }
                 }
+                String status;
+                if (!existingDatabase) {
+                    status = "initialized-v" + SCHEMA_VERSION;
+                } else if (previousVersion >= SCHEMA_VERSION) {
+                    status = "current-v" + SCHEMA_VERSION;
+                } else if (previousVersion == 0) {
+                    status = "migrated-v2.2.1-to-v3";
+                } else {
+                    status = "migrated-v" + previousVersion + "-to-v" + SCHEMA_VERSION;
+                }
+                diagnostics = new StorageDiagnostics(SCHEMA_VERSION, status, backupFile, diagnostics.corruptRows());
             } catch (Exception error) {
                 closeNow();
+                diagnostics = new StorageDiagnostics(previousVersion, "migration-failed", backupFile, diagnostics.corruptRows());
                 throw new StorageException("Could not initialize the SQLite database", error);
             }
         });
@@ -117,6 +160,7 @@ public final class SqliteShopRepository implements ShopRepository {
         return executor.supply(() -> {
             ensureInitialized();
             Map<UUID, LoadedShop> rows = new LinkedHashMap<>();
+            int corruptRows = 0;
             try (Connection connection = connection()) {
                 try (PreparedStatement statement = connection.prepareStatement("SELECT * FROM shops ORDER BY created_at ASC");
                      ResultSet result = statement.executeQuery()) {
@@ -125,7 +169,8 @@ public final class SqliteShopRepository implements ShopRepository {
                             LoadedShop row = readShop(result);
                             rows.put(row.id, row);
                         } catch (RuntimeException corruptRow) {
-                            logger.log(Level.WARNING, "Skipping a corrupt PlexonShops database row", corruptRow);
+                            corruptRows++;
+                            logger.log(Level.WARNING, "Ignoring a corrupt PlexonShops row without deleting it", corruptRow);
                         }
                     }
                 }
@@ -135,6 +180,9 @@ public final class SqliteShopRepository implements ShopRepository {
             } catch (SQLException error) {
                 throw new StorageException("Could not load shops", error);
             }
+            StorageDiagnostics current = diagnostics;
+            diagnostics = new StorageDiagnostics(
+                    current.schemaVersion(), current.migrationStatus(), current.backupFile(), corruptRows);
             return rows.values().stream().map(LoadedShop::toShop).toList();
         });
     }
@@ -289,6 +337,161 @@ public final class SqliteShopRepository implements ShopRepository {
                 throw new StorageException("Could not synchronize labeled items for shop " + shop.id(), error);
             }
         });
+    }
+
+    @Override
+    public CompletableFuture<Set<UUID>> loadFeatured() {
+        return executor.supply(() -> {
+            ensureInitialized();
+            Set<UUID> result = new LinkedHashSet<>();
+            try (Connection connection = connection();
+                 PreparedStatement statement = connection.prepareStatement(
+                         "SELECT shop_id FROM shop_features WHERE featured = 1 ORDER BY updated_at DESC, shop_id ASC");
+                 ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    result.add(UUID.fromString(rows.getString("shop_id")));
+                }
+            } catch (SQLException | IllegalArgumentException error) {
+                throw new StorageException("Could not load featured shops", error);
+            }
+            return Set.copyOf(result);
+        });
+    }
+
+    @Override
+    public CompletableFuture<PlayerDiscoveryData> loadDiscovery(UUID playerUuid, int recentLimit) {
+        return executor.supply(() -> {
+            ensureInitialized();
+            int boundedLimit = Math.clamp(recentLimit, 1, 100);
+            Set<UUID> favorites = new LinkedHashSet<>();
+            List<UUID> recent = new ArrayList<>();
+            try (Connection connection = connection()) {
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT shop_id FROM shop_favorites WHERE player_uuid = ? ORDER BY created_at DESC, shop_id ASC")) {
+                    statement.setString(1, playerUuid.toString());
+                    try (ResultSet rows = statement.executeQuery()) {
+                        while (rows.next()) {
+                            favorites.add(UUID.fromString(rows.getString("shop_id")));
+                        }
+                    }
+                }
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT shop_id FROM shop_recent_visits WHERE player_uuid = ? "
+                                + "ORDER BY last_visited_at DESC, shop_id ASC LIMIT ?")) {
+                    statement.setString(1, playerUuid.toString());
+                    statement.setInt(2, boundedLimit);
+                    try (ResultSet rows = statement.executeQuery()) {
+                        while (rows.next()) {
+                            recent.add(UUID.fromString(rows.getString("shop_id")));
+                        }
+                    }
+                }
+            } catch (SQLException | IllegalArgumentException error) {
+                throw new StorageException("Could not load discovery state for " + playerUuid, error);
+            }
+            return new PlayerDiscoveryData(favorites, recent);
+        });
+    }
+
+    @Override
+    public CompletableFuture<Void> setFavorite(
+            UUID playerUuid,
+            UUID shopId,
+            boolean favorite,
+            long timestampEpochSecond
+    ) {
+        return executor.run(() -> {
+            ensureInitialized();
+            String sql = favorite
+                    ? "INSERT INTO shop_favorites (player_uuid, shop_id, created_at) VALUES (?, ?, ?) "
+                    + "ON CONFLICT(player_uuid, shop_id) DO UPDATE SET created_at = excluded.created_at"
+                    : "DELETE FROM shop_favorites WHERE player_uuid = ? AND shop_id = ?";
+            try (Connection connection = connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, playerUuid.toString());
+                statement.setString(2, shopId.toString());
+                if (favorite) {
+                    statement.setLong(3, timestampEpochSecond);
+                }
+                statement.executeUpdate();
+            } catch (SQLException error) {
+                throw new StorageException("Could not update favorite for shop " + shopId, error);
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Void> setFeatured(UUID shopId, boolean featured, long timestampEpochSecond) {
+        return executor.run(() -> {
+            ensureInitialized();
+            String sql = featured
+                    ? "INSERT INTO shop_features (shop_id, featured, updated_at) VALUES (?, 1, ?) "
+                    + "ON CONFLICT(shop_id) DO UPDATE SET featured = 1, updated_at = excluded.updated_at"
+                    : "DELETE FROM shop_features WHERE shop_id = ?";
+            try (Connection connection = connection(); PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, shopId.toString());
+                if (featured) {
+                    statement.setLong(2, timestampEpochSecond);
+                }
+                statement.executeUpdate();
+            } catch (SQLException error) {
+                throw new StorageException("Could not update featured state for shop " + shopId, error);
+            }
+        });
+    }
+
+    @Override
+    public CompletableFuture<Void> recordRecentVisit(
+            UUID playerUuid,
+            UUID shopId,
+            long timestampEpochSecond,
+            int recentLimit
+    ) {
+        return executor.run(() -> {
+            ensureInitialized();
+            int boundedLimit = Math.clamp(recentLimit, 1, 100);
+            try (Connection connection = connection()) {
+                connection.setAutoCommit(false);
+                try {
+                    try (PreparedStatement upsert = connection.prepareStatement("""
+                            INSERT INTO shop_recent_visits (player_uuid, shop_id, last_visited_at) VALUES (?, ?, ?)
+                            ON CONFLICT(player_uuid, shop_id) DO UPDATE SET
+                                last_visited_at = excluded.last_visited_at
+                            """)) {
+                        upsert.setString(1, playerUuid.toString());
+                        upsert.setString(2, shopId.toString());
+                        upsert.setLong(3, timestampEpochSecond);
+                        upsert.executeUpdate();
+                    }
+                    try (PreparedStatement trim = connection.prepareStatement("""
+                            DELETE FROM shop_recent_visits
+                            WHERE player_uuid = ? AND shop_id NOT IN (
+                                SELECT shop_id FROM shop_recent_visits
+                                WHERE player_uuid = ?
+                                ORDER BY last_visited_at DESC, shop_id ASC
+                                LIMIT ?
+                            )
+                            """)) {
+                        trim.setString(1, playerUuid.toString());
+                        trim.setString(2, playerUuid.toString());
+                        trim.setInt(3, boundedLimit);
+                        trim.executeUpdate();
+                    }
+                    connection.commit();
+                } catch (SQLException error) {
+                    rollback(connection, error);
+                    throw error;
+                } finally {
+                    connection.setAutoCommit(true);
+                }
+            } catch (SQLException error) {
+                throw new StorageException("Could not persist recent shop visit for " + playerUuid, error);
+            }
+        });
+    }
+
+    @Override
+    public StorageDiagnostics diagnostics() {
+        return diagnostics;
     }
 
     @Override
@@ -513,6 +716,56 @@ public final class SqliteShopRepository implements ShopRepository {
         }
     }
 
+    private int preflightSchemaVersion() throws SQLException {
+        if (!databaseFile.isFile() || databaseFile.length() == 0L) {
+            return 0;
+        }
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.getAbsolutePath());
+             PreparedStatement exists = connection.prepareStatement(
+                     "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'plexonshops_schema'");
+             ResultSet row = exists.executeQuery()) {
+            if (!row.next()) {
+                return 0;
+            }
+        }
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + databaseFile.getAbsolutePath());
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT schema_version FROM plexonshops_schema WHERE id = 1");
+             ResultSet row = statement.executeQuery()) {
+            return row.next() ? row.getInt(1) : 0;
+        }
+    }
+
+    private String backupBeforeMigration() throws Exception {
+        Path source = databaseFile.toPath().toAbsolutePath();
+        String suffix = ".backup-v2.2.1-" + System.currentTimeMillis();
+        Path backup = source.resolveSibling(source.getFileName() + suffix);
+        Files.copy(source, backup, StandardCopyOption.COPY_ATTRIBUTES);
+        copySidecar(source, backup, "-wal");
+        copySidecar(source, backup, "-shm");
+        return backup.getFileName().toString();
+    }
+
+    private void copySidecar(Path source, Path backup, String suffix) throws Exception {
+        Path sidecar = Path.of(source.toString() + suffix);
+        if (Files.isRegularFile(sidecar)) {
+            Files.copy(sidecar, Path.of(backup.toString() + suffix), StandardCopyOption.COPY_ATTRIBUTES);
+        }
+    }
+
+    private void writeSchemaVersion(Connection connection, int version) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement("""
+                INSERT INTO plexonshops_schema (id, schema_version, updated_at)
+                VALUES (1, ?, CAST(strftime('%s','now') AS INTEGER))
+                ON CONFLICT(id) DO UPDATE SET
+                    schema_version = excluded.schema_version,
+                    updated_at = excluded.updated_at
+                """)) {
+            statement.setInt(1, version);
+            statement.executeUpdate();
+        }
+    }
+
     private void createSchema(Statement statement) throws SQLException {
         statement.execute("""
                 CREATE TABLE IF NOT EXISTS shops (
@@ -569,6 +822,42 @@ public final class SqliteShopRepository implements ShopRepository {
                 )
                 """);
         statement.execute("CREATE INDEX IF NOT EXISTS labeled_items_shop_idx ON labeled_items(shop_id)");
+        statement.execute("""
+                CREATE TABLE IF NOT EXISTS plexonshops_schema (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    schema_version INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """);
+        statement.execute("""
+                CREATE TABLE IF NOT EXISTS shop_features (
+                    shop_id TEXT PRIMARY KEY,
+                    featured INTEGER NOT NULL DEFAULT 1 CHECK(featured IN (0, 1)),
+                    updated_at INTEGER NOT NULL,
+                    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
+                )
+                """);
+        statement.execute("""
+                CREATE TABLE IF NOT EXISTS shop_favorites (
+                    player_uuid TEXT NOT NULL,
+                    shop_id TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY (player_uuid, shop_id),
+                    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
+                )
+                """);
+        statement.execute("CREATE INDEX IF NOT EXISTS shop_favorites_player_idx ON shop_favorites(player_uuid)");
+        statement.execute("""
+                CREATE TABLE IF NOT EXISTS shop_recent_visits (
+                    player_uuid TEXT NOT NULL,
+                    shop_id TEXT NOT NULL,
+                    last_visited_at INTEGER NOT NULL,
+                    PRIMARY KEY (player_uuid, shop_id),
+                    FOREIGN KEY (shop_id) REFERENCES shops(id) ON DELETE CASCADE
+                )
+                """);
+        statement.execute("CREATE INDEX IF NOT EXISTS shop_recent_player_idx "
+                + "ON shop_recent_visits(player_uuid, last_visited_at DESC)");
     }
 
     private static final class LoadedShop {

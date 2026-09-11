@@ -2,35 +2,61 @@ name: Release
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    tags:
+      - 'v3.0.0-rc.1'
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag, for example v2.2.1
+        description: Immutable RC tag (must be v3.0.0-rc.1)
         required: true
+        default: v3.0.0-rc.1
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-v3.0.0-rc.1
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.ref, 'refs/tags/') ||
-      (github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release]'))
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
-      - name: Check out source
+      - name: Resolve requested tag
+        id: requested
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
+            TAG="$INPUT_TAG"
+          else
+            TAG="$REF_NAME"
+          fi
+          test "$TAG" = 'v3.0.0-rc.1'
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Check out immutable tag
         uses: actions/checkout@v5
         with:
+          ref: ${{ steps.requested.outputs.tag }}
           fetch-depth: 0
+      - name: Verify exact tagged checkout
+        id: source
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG_COMMIT=$(git rev-list -n 1 "$RELEASE_TAG")
+          HEAD_SHA=$(git rev-parse HEAD)
+          test "$HEAD_SHA" = "$TAG_COMMIT"
+          test "$(git status --porcelain)" = ''
+          echo "commit=$HEAD_SHA" >> "$GITHUB_OUTPUT"
       - name: Set up Java 25
         uses: actions/setup-java@v5
         with:
@@ -43,38 +69,148 @@ jobs:
         run: |
           set -euo pipefail
           core_jar="${RUNNER_TEMP}/PlexonCore-2.0.4.jar"
-          curl --fail --location --silent --show-error --output "${core_jar}" \
-            "https://github.com/ZpkDxGames/PlexonCore/releases/download/v2.0.4/PlexonCore-2.0.4.jar"
+          curl --fail --location --silent --show-error --output "$core_jar" \
+            'https://github.com/ZpkDxGames/PlexonCore/releases/download/v2.0.4/PlexonCore-2.0.4.jar'
           echo "61d625a717da9f46ee9231e1970d84b4c317ae12cf4090cdf7c9d39b6a1a9baf  ${core_jar}" | sha256sum --check
           mvn -B -ntp org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
-            -Dfile="${core_jar}" -DgroupId=com.zpkdxgames -DartifactId=PlexonCore \
+            -Dfile="$core_jar" -DgroupId=com.zpkdxgames -DartifactId=PlexonCore \
             -Dversion=2.0.4 -Dpackaging=jar -DgeneratePom=true
-      - name: Verify and package
+      - name: Rebuild and test exact tag
         run: ./gradlew --no-daemon clean test check javadoc shadowJar verifyDistribution --stacktrace
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REQUESTED_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
+      - name: Verify tagged distribution and build evidence
+        id: evidence
         shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
         run: |
           set -euo pipefail
           VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
-          EXPECTED_TAG="v${VERSION}"
-          RELEASE_TAG="${REQUESTED_TAG:-$EXPECTED_TAG}"
+          test "$VERSION" = '3.0.0-rc.1'
+          test "$RELEASE_TAG" = "v${VERSION}"
           JAR="build/libs/PlexonShops-${VERSION}.jar"
-          CHECKSUM="build/release/SHA256SUMS.txt"
-          test "$VERSION" = "2.2.1"
-          if [ "$RELEASE_TAG" != "$EXPECTED_TAG" ]; then
-            echo "Release tag $RELEASE_TAG does not match project version $VERSION" >&2
-            exit 1
-          fi
+          test -s "$JAR"
           mkdir -p build/release
-          (cd "$(dirname "$JAR")" && sha256sum "$(basename "$JAR")" > ../release/SHA256SUMS.txt && sha256sum --check ../release/SHA256SUMS.txt)
+          jar tf "$JAR" > build/release/JAR_CONTENTS.txt
+
+          for entry in \
+            plugin.yml config.yml messages.yml \
+            com/plexon/shops/PlexonShops.class \
+            com/plexon/shops/api/PlexonShopsAPI.class \
+            com/plexon/shops/api/AvailabilityView.class \
+            com/plexon/shops/services/DiscoveryService.class \
+            com/plexon/shops/services/TeleportAttemptRegistry.class \
+            com/plexon/shops/services/ShopAvailabilityResolver.class \
+            com/plexon/shops/event/PlexonShopCreatedEvent.class \
+            com/plexon/shops/event/PlexonShopVisitedEvent.class \
+            com/plexon/shops/event/PlexonShopRatedEvent.class \
+            com/zaxxer/hikari/HikariDataSource.class \
+            org/sqlite/JDBC.class \
+            META-INF/THIRD_PARTY_NOTICES.md; do
+            grep -qx "$entry" build/release/JAR_CONTENTS.txt
+          done
+
+          for prefix in \
+            'com/zpkdxgames/plexoncore/' \
+            'net/milkbowl/vault/' \
+            'me/clip/placeholderapi/' \
+            'org/bukkit/' \
+            'io/papermc/paper/' \
+            'net/kyori/adventure/' \
+            'net/luckperms/api/'; do
+            if grep -q "^${prefix}" build/release/JAR_CONTENTS.txt; then
+              echo "Forbidden provided API shaded into PlexonShops: ${prefix}" >&2
+              exit 1
+            fi
+          done
+
+          unzip -p "$JAR" plugin.yml \
+            | sed -n 's/^version:[[:space:]]*//p' \
+            | head -n 1 | tr -d " '\"\r" | grep -qx "$VERSION"
+          javap -verbose -classpath "$JAR" com.plexon.shops.PlexonShops | grep -q 'major version: 69'
+
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+          totals = dict(executed=0, failures=0, errors=0, skipped=0)
+          paths = glob.glob('build/test-results/test/TEST-*.xml')
+          if not paths:
+              raise SystemExit('No JUnit XML results found')
+          for path in paths:
+              root = ET.parse(path).getroot()
+              totals['executed'] += int(root.attrib.get('tests', 0))
+              totals['failures'] += int(root.attrib.get('failures', 0))
+              totals['errors'] += int(root.attrib.get('errors', 0))
+              totals['skipped'] += int(root.attrib.get('skipped', 0))
+          if totals['executed'] <= 17:
+              raise SystemExit(f"Expanded Phase 2 suite did not exceed legacy 17-test evidence: {totals['executed']}")
+          if any(totals[key] for key in ('failures', 'errors', 'skipped')):
+              raise SystemExit(f'Non-clean test totals: {totals}')
+          with open('build/release/TEST_SUMMARY.txt', 'w', encoding='utf-8') as out:
+              for key in ('executed', 'failures', 'errors', 'skipped'):
+                  out.write(f'{key}={totals[key]}\n')
+          PY
+
+          (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar" > ../release/SHA256SUMS.txt)
+          (cd build/libs && sha256sum --check ../release/SHA256SUMS.txt)
+          cat > build/release/PROVENANCE.txt <<EOF
+          repository=ZpkDxGames/PlexonShops
+          commit=${SOURCE_SHA}
+          version=${VERSION}
+          java_major=69
+          plexoncore=2.0.4
+          tag=${RELEASE_TAG}
+          rollback_tag=v2.2.1
+          rollback_commit=81c77e936194de2d46fd40221ea57a1f65c07b34
+          runtime_certification=NOT_EXECUTED
+          EOF
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "jar_size=$(stat -c%s "$JAR")" >> "$GITHUB_OUTPUT"
+          echo "jar_sha256=$(sha256sum "$JAR" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Publish immutable prerelease assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
+          VERSION: ${{ steps.evidence.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; refusing to overwrite immutable stable assets." >&2
+            echo "Release $RELEASE_TAG already exists; refusing to overwrite immutable RC assets." >&2
             exit 1
           fi
-          gh release create "$RELEASE_TAG" "$JAR" "$CHECKSUM" \
-            --target "$GITHUB_SHA" \
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$SOURCE_SHA"
+          gh release create "$RELEASE_TAG" \
+            "build/libs/PlexonShops-${VERSION}.jar" \
+            build/release/SHA256SUMS.txt \
+            build/release/TEST_SUMMARY.txt \
+            build/release/PROVENANCE.txt \
+            --target "$SOURCE_SHA" \
             --title "PlexonShops ${VERSION}" \
-            --notes-file "releases/${VERSION}.md"
+            --notes-file "releases/${VERSION}.md" \
+            --prerelease
+      - name: Verify published prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
+          VERSION: ${{ steps.evidence.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$SOURCE_SHA"
+          gh release view "$RELEASE_TAG" --json isPrerelease,tagName > build/release/release.json
+          python3 - <<'PY'
+          import json
+          data = json.load(open('build/release/release.json', encoding='utf-8'))
+          assert data['isPrerelease'] is True
+          assert data['tagName'] == 'v3.0.0-rc.1'
+          PY
+          mkdir -p build/release/downloaded
+          gh release download "$RELEASE_TAG" --dir build/release/downloaded
+          test -s "build/release/downloaded/PlexonShops-${VERSION}.jar"
+          (cd build/release/downloaded && sha256sum --check SHA256SUMS.txt)
+          cmp "build/libs/PlexonShops-${VERSION}.jar" "build/release/downloaded/PlexonShops-${VERSION}.jar"
+          cmp build/release/TEST_SUMMARY.txt build/release/downloaded/TEST_SUMMARY.txt
+          cmp build/release/PROVENANCE.txt build/release/downloaded/PROVENANCE.txt
