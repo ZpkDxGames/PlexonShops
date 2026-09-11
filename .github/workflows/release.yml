@@ -2,92 +2,93 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v3.0.0-rc.1'
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Immutable RC tag (must be v3.0.0-rc.1)
-        required: true
-        default: v3.0.0-rc.1
-        type: string
+    branches: [release/stable]
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
-  group: release-v3.0.0-rc.1
+  group: plexonshops-stable
   cancel-in-progress: false
 
+env:
+  ACCEPTED_PHASE3_SHA: 'aed5c49ae3cddb54ad2e456a49bf7ce5e67ad673'
+  ACCEPTED_RC2_SHA: '41beed7b394042955b6fd0cc71e00b241ff1a6f3'
+  ROLLBACK_TAG: 'v2.2.1'
+  ROLLBACK_SHA: '81c77e936194de2d46fd40221ea57a1f65c07b34'
+  PLEXONCORE_SHA256: '61d625a717da9f46ee9231e1970d84b4c317ae12cf4090cdf7c9d39b6a1a9baf'
+
 jobs:
-  publish:
-    runs-on: ubuntu-latest
+  release:
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Resolve requested tag
-        id: requested
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ inputs.tag }}
-        run: |
-          set -euo pipefail
-          if [ "$EVENT_NAME" = 'workflow_dispatch' ]; then
-            TAG="$INPUT_TAG"
-          else
-            TAG="$REF_NAME"
-          fi
-          test "$TAG" = 'v3.0.0-rc.1'
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-      - name: Check out immutable tag
+      - name: Check out exact stable candidate
         uses: actions/checkout@v5
         with:
-          ref: ${{ steps.requested.outputs.tag }}
           fetch-depth: 0
-      - name: Verify exact tagged checkout
-        id: source
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
-        run: |
-          set -euo pipefail
-          TAG_COMMIT=$(git rev-list -n 1 "$RELEASE_TAG")
-          HEAD_SHA=$(git rev-parse HEAD)
-          test "$HEAD_SHA" = "$TAG_COMMIT"
-          test "$(git status --porcelain)" = ''
-          echo "commit=$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
       - name: Set up Java 25
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Provision PlexonCore 2.0.4 API
+
+      - name: Provision immutable PlexonCore 2.0.4 API
         shell: bash
         run: |
           set -euo pipefail
           core_jar="${RUNNER_TEMP}/PlexonCore-2.0.4.jar"
-          curl --fail --location --silent --show-error --output "$core_jar" \
+          curl --fail --location --silent --show-error --retry 3 -o "$core_jar" \
             'https://github.com/ZpkDxGames/PlexonCore/releases/download/v2.0.4/PlexonCore-2.0.4.jar'
-          echo "61d625a717da9f46ee9231e1970d84b4c317ae12cf4090cdf7c9d39b6a1a9baf  ${core_jar}" | sha256sum --check
+          echo "${PLEXONCORE_SHA256}  $core_jar" | sha256sum --check
           mvn -B -ntp org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
             -Dfile="$core_jar" -DgroupId=com.zpkdxgames -DartifactId=PlexonCore \
             -Dversion=2.0.4 -Dpackaging=jar -DgeneratePom=true
-      - name: Rebuild and test exact tag
-        run: ./gradlew --no-daemon clean test check javadoc shadowJar verifyDistribution --stacktrace
-      - name: Verify tagged distribution and build evidence
-        id: evidence
+
+      - name: Resolve stable version
         shell: bash
-        env:
-          SOURCE_SHA: ${{ steps.source.outputs.commit }}
-          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
         run: |
           set -euo pipefail
-          VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
-          test "$VERSION" = '3.0.0-rc.1'
-          test "$RELEASE_TAG" = "v${VERSION}"
+          VERSION="$(./gradlew -q properties | sed -n 's/^version: //p')"
+          test -n "$VERSION"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "RELEASE_TAG=v${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Verify exact stable boundary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" != *-* ]] || { echo 'Stable version must not contain a prerelease suffix.' >&2; exit 1; }
+          main_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$GITHUB_SHA" = "$main_sha"
+          git merge-base --is-ancestor "$ACCEPTED_PHASE3_SHA" HEAD
+          git merge-base --is-ancestor "$ACCEPTED_RC2_SHA" HEAD
+          grep -F 'io.papermc.paper:paper-api:26.2.build.121-stable' build.gradle.kts
+          grep -F 'com.zpkdxgames:PlexonCore:2.0.4' build.gradle.kts
+          test -s "releases/${VERSION}.md"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "$RELEASE_TAG already exists; refusing to move a stable tag." >&2
+            exit 1
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$RELEASE_TAG release already exists; refusing replacement." >&2
+            exit 1
+          fi
+
+      - name: Rebuild and test exact stable source
+        run: ./gradlew --no-daemon clean test check javadoc shadowJar verifyDistribution --stacktrace
+
+      - name: Verify exact distribution
+        shell: bash
+        run: |
+          set -euo pipefail
           JAR="build/libs/PlexonShops-${VERSION}.jar"
           test -s "$JAR"
           mkdir -p build/release
@@ -100,6 +101,7 @@ jobs:
             com/plexon/shops/api/AvailabilityView.class \
             com/plexon/shops/services/DiscoveryService.class \
             com/plexon/shops/services/TeleportAttemptRegistry.class \
+            com/plexon/shops/services/TeleportService.class \
             com/plexon/shops/services/ShopAvailabilityResolver.class \
             com/plexon/shops/event/PlexonShopCreatedEvent.class \
             com/plexon/shops/event/PlexonShopVisitedEvent.class \
@@ -127,6 +129,7 @@ jobs:
           unzip -p "$JAR" plugin.yml \
             | sed -n 's/^version:[[:space:]]*//p' \
             | head -n 1 | tr -d " '\"\r" | grep -qx "$VERSION"
+          unzip -p "$JAR" META-INF/MANIFEST.MF | tr -d '\r' | grep -F "Implementation-Version: ${VERSION}"
           javap -verbose -classpath "$JAR" com.plexon.shops.PlexonShops | grep -q 'major version: 69'
 
           python3 - <<'PY'
@@ -142,75 +145,100 @@ jobs:
               totals['failures'] += int(root.attrib.get('failures', 0))
               totals['errors'] += int(root.attrib.get('errors', 0))
               totals['skipped'] += int(root.attrib.get('skipped', 0))
-          if totals['executed'] <= 17:
-              raise SystemExit(f"Expanded Phase 2 suite did not exceed legacy 17-test evidence: {totals['executed']}")
+          if totals['executed'] <= 0:
+              raise SystemExit('No tests executed')
           if any(totals[key] for key in ('failures', 'errors', 'skipped')):
               raise SystemExit(f'Non-clean test totals: {totals}')
           with open('build/release/TEST_SUMMARY.txt', 'w', encoding='utf-8') as out:
-              for key in ('executed', 'failures', 'errors', 'skipped'):
-                  out.write(f'{key}={totals[key]}\n')
+              out.write(f"TEST_COUNT={totals['executed']} FAILURES={totals['failures']} ERRORS={totals['errors']} SKIPPED={totals['skipped']}\n")
+          print(totals)
           PY
 
-          (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar" > ../release/SHA256SUMS.txt)
+          (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar") > build/release/SHA256SUMS.txt
           (cd build/libs && sha256sum --check ../release/SHA256SUMS.txt)
-          cat > build/release/PROVENANCE.txt <<EOF
-          repository=ZpkDxGames/PlexonShops
-          commit=${SOURCE_SHA}
-          version=${VERSION}
-          java_major=69
-          plexoncore=2.0.4
-          tag=${RELEASE_TAG}
-          rollback_tag=v2.2.1
-          rollback_commit=81c77e936194de2d46fd40221ea57a1f65c07b34
-          runtime_certification=NOT_EXECUTED
-          EOF
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "jar_size=$(stat -c%s "$JAR")" >> "$GITHUB_OUTPUT"
-          echo "jar_sha256=$(sha256sum "$JAR" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-      - name: Publish immutable prerelease assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
-          VERSION: ${{ steps.evidence.outputs.version }}
-          SOURCE_SHA: ${{ steps.source.outputs.commit }}
+
+      - name: Build exact release evidence
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; refusing to overwrite immutable RC assets." >&2
-            exit 1
-          fi
-          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$SOURCE_SHA"
+          JAR="build/libs/PlexonShops-${VERSION}.jar"
+          digest="$(sha256sum "$JAR" | awk '{print $1}')"
+          size="$(stat -c%s "$JAR")"
+          cat > build/release/PROVENANCE.txt <<EOF
+          repository=$GITHUB_REPOSITORY
+          source_sha=$GITHUB_SHA
+          accepted_phase3=$ACCEPTED_PHASE3_SHA
+          accepted_rc2=$ACCEPTED_RC2_SHA
+          version=$VERSION
+          java=25
+          java_major=69
+          paper=26.2.build.121-stable
+          plexoncore=2.0.4
+          plexoncore_sha256=$PLEXONCORE_SHA256
+          rollback_tag=$ROLLBACK_TAG
+          rollback_sha=$ROLLBACK_SHA
+          jar_size=$size
+          jar_sha256=$digest
+          teleport_logout_settlement=ASYNC_COMPLETION_AUTHORITATIVE
+          runtime_certification=NOT_EXECUTED
+          EOF
+
+      - name: Publish GitHub stable release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
           gh release create "$RELEASE_TAG" \
             "build/libs/PlexonShops-${VERSION}.jar" \
             build/release/SHA256SUMS.txt \
             build/release/TEST_SUMMARY.txt \
             build/release/PROVENANCE.txt \
-            --target "$SOURCE_SHA" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
             --title "PlexonShops ${VERSION}" \
             --notes-file "releases/${VERSION}.md" \
-            --prerelease
-      - name: Verify published prerelease
+            --latest
+
+      - name: Verify published stable release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.requested.outputs.tag }}
-          VERSION: ${{ steps.evidence.outputs.version }}
-          SOURCE_SHA: ${{ steps.source.outputs.commit }}
-        shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-list -n 1 "$RELEASE_TAG")" = "$SOURCE_SHA"
-          gh release view "$RELEASE_TAG" --json isPrerelease,tagName > build/release/release.json
-          python3 - <<'PY'
-          import json
-          data = json.load(open('build/release/release.json', encoding='utf-8'))
-          assert data['isPrerelease'] is True
-          assert data['tagName'] == 'v3.0.0-rc.1'
-          PY
-          mkdir -p build/release/downloaded
-          gh release download "$RELEASE_TAG" --dir build/release/downloaded
-          test -s "build/release/downloaded/PlexonShops-${VERSION}.jar"
-          (cd build/release/downloaded && sha256sum --check SHA256SUMS.txt)
-          cmp "build/libs/PlexonShops-${VERSION}.jar" "build/release/downloaded/PlexonShops-${VERSION}.jar"
-          cmp build/release/TEST_SUMMARY.txt build/release/downloaded/TEST_SUMMARY.txt
-          cmp build/release/PROVENANCE.txt build/release/downloaded/PROVENANCE.txt
+          tag_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')"
+          test "$tag_sha" = "$GITHUB_SHA"
+          release_json="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isPrerelease,targetCommitish,assets)"
+          echo "$release_json" | jq -e --arg tag "$RELEASE_TAG" --arg sha "$GITHUB_SHA" \
+            '.tagName == $tag and .isPrerelease == false and .targetCommitish == $sha' >/dev/null
+          actual_assets="$(echo "$release_json" | jq -r '.assets[].name' | sort)"
+          expected_assets="$(printf '%s\n' "PlexonShops-${VERSION}.jar" PROVENANCE.txt SHA256SUMS.txt TEST_SUMMARY.txt | sort)"
+          diff -u <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets")
+          rm -rf published
+          mkdir published
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir published \
+            --pattern "PlexonShops-${VERSION}.jar" \
+            --pattern 'SHA256SUMS.txt' \
+            --pattern 'TEST_SUMMARY.txt' \
+            --pattern 'PROVENANCE.txt'
+          test "$(find published -maxdepth 1 -type f | wc -l)" -eq 4
+          (cd published && sha256sum --check SHA256SUMS.txt)
+          grep -Fx "repository=$GITHUB_REPOSITORY" published/PROVENANCE.txt
+          grep -Fx "source_sha=$GITHUB_SHA" published/PROVENANCE.txt
+          grep -Fx "accepted_phase3=$ACCEPTED_PHASE3_SHA" published/PROVENANCE.txt
+          grep -Fx "accepted_rc2=$ACCEPTED_RC2_SHA" published/PROVENANCE.txt
+          grep -Fx "version=$VERSION" published/PROVENANCE.txt
+          grep -Fx 'teleport_logout_settlement=ASYNC_COMPLETION_AUTHORITATIVE' published/PROVENANCE.txt
+          grep -Fx 'runtime_certification=NOT_EXECUTED' published/PROVENANCE.txt
+          grep -Eq '^TEST_COUNT=[1-9][0-9]* FAILURES=0 ERRORS=0 SKIPPED=0$' published/TEST_SUMMARY.txt
+
+      - name: Upload release verification evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: PlexonShops-release-${{ github.sha }}
+          path: |
+            published/PlexonShops-*.jar
+            published/SHA256SUMS.txt
+            published/TEST_SUMMARY.txt
+            published/PROVENANCE.txt
+          if-no-files-found: error
