@@ -12,7 +12,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 
 import java.util.UUID;
 
-/** Movement, damage and disconnect cancellation for pending shop teleports. */
+/** Movement, damage and disconnect cancellation for pending shop teleport warmups. */
 public final class TeleportListener implements Listener {
     private final TeleportService teleports;
 
@@ -48,7 +48,7 @@ public final class TeleportListener implements Listener {
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        teleports.cancel(event.getPlayer().getUniqueId(), false);
+        teleports.cancelPending(event.getPlayer().getUniqueId(), false);
     }
 
     private boolean samePosition(Location from, Location to) {
