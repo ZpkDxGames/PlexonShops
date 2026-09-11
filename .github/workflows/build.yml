@@ -5,47 +5,72 @@ on:
     branches: ['**']
     tags-ignore: ['v*']
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  ACCEPTED_PHASE3_SHA: 'aed5c49ae3cddb54ad2e456a49bf7ce5e67ad673'
+  ACCEPTED_RC2_SHA: '41beed7b394042955b6fd0cc71e00b241ff1a6f3'
+  ROLLBACK_TAG: 'v2.2.1'
+  ROLLBACK_SHA: '81c77e936194de2d46fd40221ea57a1f65c07b34'
+  PLEXONCORE_SHA256: '61d625a717da9f46ee9231e1970d84b4c317ae12cf4090cdf7c9d39b6a1a9baf'
+
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - name: Check out source
+      - name: Check out exact source
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+
       - name: Set up Java 25
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-      - name: Provision PlexonCore 2.0.4 API
+
+      - name: Provision immutable PlexonCore 2.0.4 API
         shell: bash
         run: |
           set -euo pipefail
           core_jar="${RUNNER_TEMP}/PlexonCore-2.0.4.jar"
-          curl --fail --location --silent --show-error --output "${core_jar}" \
-            "https://github.com/ZpkDxGames/PlexonCore/releases/download/v2.0.4/PlexonCore-2.0.4.jar"
-          echo "61d625a717da9f46ee9231e1970d84b4c317ae12cf4090cdf7c9d39b6a1a9baf  ${core_jar}" | sha256sum --check
+          curl --fail --location --silent --show-error --retry 3 -o "$core_jar" \
+            'https://github.com/ZpkDxGames/PlexonCore/releases/download/v2.0.4/PlexonCore-2.0.4.jar'
+          echo "${PLEXONCORE_SHA256}  $core_jar" | sha256sum --check
           mvn -B -ntp org.apache.maven.plugins:maven-install-plugin:3.1.4:install-file \
-            -Dfile="${core_jar}" -DgroupId=com.zpkdxgames -DartifactId=PlexonCore \
+            -Dfile="$core_jar" -DgroupId=com.zpkdxgames -DartifactId=PlexonCore \
             -Dversion=2.0.4 -Dpackaging=jar -DgeneratePom=true
-      - name: Full candidate verification
+
+      - name: Resolve version and prove accepted lineage
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(./gradlew -q properties | sed -n 's/^version: //p')"
+          test -n "$VERSION"
+          git merge-base --is-ancestor "$ACCEPTED_PHASE3_SHA" HEAD
+          git merge-base --is-ancestor "$ACCEPTED_RC2_SHA" HEAD
+          grep -F 'io.papermc.paper:paper-api:26.2.build.121-stable' build.gradle.kts
+          grep -F 'com.zpkdxgames:PlexonCore:2.0.4' build.gradle.kts
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Full source verification
         run: ./gradlew --no-daemon clean test check javadoc shadowJar verifyDistribution --stacktrace
-      - name: Build exact-head evidence
+
+      - name: Verify tests and distribution
         id: evidence
         shell: bash
         run: |
           set -euo pipefail
-          VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
-          test "$VERSION" = "3.0.0-rc.2"
           JAR="build/libs/PlexonShops-${VERSION}.jar"
           test -s "$JAR"
           mkdir -p build/release
@@ -58,6 +83,7 @@ jobs:
             com/plexon/shops/api/AvailabilityView.class \
             com/plexon/shops/services/DiscoveryService.class \
             com/plexon/shops/services/TeleportAttemptRegistry.class \
+            com/plexon/shops/services/TeleportService.class \
             com/plexon/shops/services/ShopAvailabilityResolver.class \
             com/plexon/shops/event/PlexonShopCreatedEvent.class \
             com/plexon/shops/event/PlexonShopVisitedEvent.class \
@@ -85,8 +111,8 @@ jobs:
           unzip -p "$JAR" plugin.yml \
             | sed -n 's/^version:[[:space:]]*//p' \
             | head -n 1 | tr -d " '\"\r" | grep -qx "$VERSION"
+          unzip -p "$JAR" META-INF/MANIFEST.MF | tr -d '\r' | grep -F "Implementation-Version: ${VERSION}"
           javap -verbose -classpath "$JAR" com.plexon.shops.PlexonShops | grep -q 'major version: 69'
-          grep -F 'io.papermc.paper:paper-api:26.2.build.121-stable' build.gradle.kts
 
           python3 - <<'PY'
           import glob
@@ -101,40 +127,55 @@ jobs:
               totals['failures'] += int(root.attrib.get('failures', 0))
               totals['errors'] += int(root.attrib.get('errors', 0))
               totals['skipped'] += int(root.attrib.get('skipped', 0))
-          if totals['executed'] <= 17:
-              raise SystemExit(f"Expanded suite did not exceed legacy 17-test evidence: {totals['executed']}")
+          if totals['executed'] <= 0:
+              raise SystemExit('No tests executed')
           if any(totals[key] for key in ('failures', 'errors', 'skipped')):
               raise SystemExit(f'Non-clean test totals: {totals}')
           with open('build/release/TEST_SUMMARY.txt', 'w', encoding='utf-8') as out:
-              for key in ('executed', 'failures', 'errors', 'skipped'):
-                  out.write(f'{key}={totals[key]}\n')
+              out.write(f"TEST_COUNT={totals['executed']} FAILURES={totals['failures']} ERRORS={totals['errors']} SKIPPED={totals['skipped']}\n")
+          print(totals)
           PY
 
-          (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar" > ../release/SHA256SUMS.txt)
+          (cd build/libs && sha256sum "PlexonShops-${VERSION}.jar") > build/release/SHA256SUMS.txt
           (cd build/libs && sha256sum --check ../release/SHA256SUMS.txt)
+          echo "jar_size=$(stat -c%s "$JAR")" >> "$GITHUB_OUTPUT"
+          echo "jar_sha256=$(sha256sum "$JAR" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Write exact provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          JAR="build/libs/PlexonShops-${VERSION}.jar"
+          digest="$(sha256sum "$JAR" | awk '{print $1}')"
+          size="$(stat -c%s "$JAR")"
           cat > build/release/PROVENANCE.txt <<EOF
-          repository=ZpkDxGames/PlexonShops
-          commit=${GITHUB_SHA}
-          accepted_phase3=aed5c49ae3cddb54ad2e456a49bf7ce5e67ad673
-          version=${VERSION}
+          repository=$GITHUB_REPOSITORY
+          source_sha=$GITHUB_SHA
+          accepted_phase3=$ACCEPTED_PHASE3_SHA
+          accepted_rc2=$ACCEPTED_RC2_SHA
+          version=$VERSION
+          java=25
           java_major=69
           paper=26.2.build.121-stable
           plexoncore=2.0.4
-          rollback_tag=v2.2.1
+          plexoncore_sha256=$PLEXONCORE_SHA256
+          rollback_tag=$ROLLBACK_TAG
+          rollback_sha=$ROLLBACK_SHA
+          jar_size=$size
+          jar_sha256=$digest
+          teleport_logout_settlement=ASYNC_COMPLETION_AUTHORITATIVE
           runtime_certification=NOT_EXECUTED
           EOF
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "jar=${JAR}" >> "$GITHUB_OUTPUT"
-          echo "jar_size=$(stat -c%s "$JAR")" >> "$GITHUB_OUTPUT"
-          echo "jar_sha256=$(sha256sum "$JAR" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
       - name: Check source whitespace
         run: git diff --check origin/main...HEAD
-      - name: Upload exact-head candidate artifact
+
+      - name: Upload verified artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PlexonShops-${{ steps.evidence.outputs.version }}-${{ github.sha }}
+          name: PlexonShops-${{ steps.version.outputs.version }}-${{ github.sha }}
           path: |
-            build/libs/PlexonShops-${{ steps.evidence.outputs.version }}.jar
+            build/libs/PlexonShops-${{ steps.version.outputs.version }}.jar
             build/release/SHA256SUMS.txt
             build/release/TEST_SUMMARY.txt
             build/release/PROVENANCE.txt

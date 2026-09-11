@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.plexon"
-version = "3.0.0-rc.2"
+version = "3.0.0"
 
 val pluginVersion = version.toString()
 
@@ -125,9 +125,6 @@ val verifyDistribution = tasks.register("verifyDistribution") {
                 "com/plexon/shops/PlexonShops.class",
                 "com/plexon/shops/api/PlexonShopsAPI.class",
                 "com/plexon/shops/api/ShopView.class",
-                "com/plexon/shops/event/PlexonShopCreatedEvent.class",
-                "com/plexon/shops/event/PlexonShopVisitedEvent.class",
-                "com/plexon/shops/event/PlexonShopRatedEvent.class",
                 "com/plexon/shops/services/ShopAvailabilityResolver.class",
                 "com/plexon/shops/services/DiscoveryService.class",
                 "com/plexon/shops/services/ConfirmationService.class",
