@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(./gradlew -q properties | sed -n 's/^version: //p')
-          test "$VERSION" = "3.0.0-rc.1"
+          test "$VERSION" = "3.0.0-rc.2"
           JAR="build/libs/PlexonShops-${VERSION}.jar"
           test -s "$JAR"
           mkdir -p build/release
@@ -86,6 +86,7 @@ jobs:
             | sed -n 's/^version:[[:space:]]*//p' \
             | head -n 1 | tr -d " '\"\r" | grep -qx "$VERSION"
           javap -verbose -classpath "$JAR" com.plexon.shops.PlexonShops | grep -q 'major version: 69'
+          grep -F 'io.papermc.paper:paper-api:26.2.build.121-stable' build.gradle.kts
 
           python3 - <<'PY'
           import glob
@@ -101,7 +102,7 @@ jobs:
               totals['errors'] += int(root.attrib.get('errors', 0))
               totals['skipped'] += int(root.attrib.get('skipped', 0))
           if totals['executed'] <= 17:
-              raise SystemExit(f"Expanded Phase 2 suite did not exceed legacy 17-test evidence: {totals['executed']}")
+              raise SystemExit(f"Expanded suite did not exceed legacy 17-test evidence: {totals['executed']}")
           if any(totals[key] for key in ('failures', 'errors', 'skipped')):
               raise SystemExit(f'Non-clean test totals: {totals}')
           with open('build/release/TEST_SUMMARY.txt', 'w', encoding='utf-8') as out:
@@ -114,11 +115,12 @@ jobs:
           cat > build/release/PROVENANCE.txt <<EOF
           repository=ZpkDxGames/PlexonShops
           commit=${GITHUB_SHA}
+          accepted_phase3=aed5c49ae3cddb54ad2e456a49bf7ce5e67ad673
           version=${VERSION}
           java_major=69
+          paper=26.2.build.121-stable
           plexoncore=2.0.4
           rollback_tag=v2.2.1
-          rollback_commit=81c77e936194de2d46fd40221ea57a1f65c07b34
           runtime_certification=NOT_EXECUTED
           EOF
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
