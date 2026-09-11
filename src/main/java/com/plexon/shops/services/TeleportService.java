@@ -149,7 +149,7 @@ public final class TeleportService {
             return;
         }
         if (!to.getWorld().getUID().equals(active.worldUuid()) || squaredDistance(to, active) > 1.0E-6D) {
-            cancel(player.getUniqueId(), "teleport-cancelled");
+            cancelWarmup(player.getUniqueId(), "teleport-cancelled");
         }
     }
 
@@ -158,17 +158,21 @@ public final class TeleportService {
             return;
         }
         if (config.get().teleport().cancelOnDamage()) {
-            cancel(player.getUniqueId(), "teleport-cancelled-damage");
+            cancelWarmup(player.getUniqueId(), "teleport-cancelled-damage");
         }
     }
 
-    public void cancel(UUID playerUuid, boolean notify) {
-        cancel(playerUuid, notify ? "teleport-cancelled" : null);
+    /**
+     * Cancels only the still-pending warmup. Once Paper's teleportAsync has started,
+     * its completion remains authoritative for success/failure and fee settlement.
+     */
+    public void cancelPending(UUID playerUuid, boolean notify) {
+        cancelWarmup(playerUuid, notify ? "teleport-cancelled" : null);
     }
 
     public void cancelAll() {
         for (UUID playerUuid : List.copyOf(pending.keySet())) {
-            cancel(playerUuid, (String) null);
+            cancelWarmup(playerUuid, null);
         }
         for (InFlightTeleport attempt : inFlight.drain()) {
             economy.refund(attempt.player(), attempt.chargedAmount());
@@ -229,7 +233,9 @@ public final class TeleportService {
         } catch (RuntimeException error) {
             if (inFlight.complete(playerUuid, attempt)) {
                 economy.refund(player, attempt.chargedAmount());
-                messages.get().send(player, "teleport-failed");
+                if (player.isOnline()) {
+                    messages.get().send(player, "teleport-failed");
+                }
             }
         }
     }
@@ -248,7 +254,9 @@ public final class TeleportService {
         try {
             if (error != null || !success) {
                 economy.refund(attempt.player(), attempt.chargedAmount());
-                messages.get().send(attempt.player(), "teleport-failed");
+                if (attempt.player().isOnline()) {
+                    messages.get().send(attempt.player(), "teleport-failed");
+                }
                 return;
             }
             shops.recordVisit(shop.id(), playerUuid).exceptionally(recordError -> {
@@ -264,12 +272,14 @@ public final class TeleportService {
                 cooldowns.put(playerUuid,
                         System.nanoTime() + settings.teleport().cooldownSeconds() * 1_000_000_000L);
             }
-            playEffects(attempt.player(), true, settings.teleport().effects());
-            messages.get().send(attempt.player(), "teleport-success", messages.get().storedTag("shop", shop.name()));
-            attempt.player().sendActionBar(messages.get().get(
-                    "teleport-arrival-actionbar",
-                    messages.get().storedTag("shop", shop.name())
-            ));
+            if (attempt.player().isOnline()) {
+                playEffects(attempt.player(), true, settings.teleport().effects());
+                messages.get().send(attempt.player(), "teleport-success", messages.get().storedTag("shop", shop.name()));
+                attempt.player().sendActionBar(messages.get().get(
+                        "teleport-arrival-actionbar",
+                        messages.get().storedTag("shop", shop.name())
+                ));
+            }
         } finally {
             inFlight.complete(playerUuid, attempt);
         }
@@ -293,7 +303,7 @@ public final class TeleportService {
             PendingTeleport active = entry.getValue();
             Player player = Bukkit.getPlayer(playerUuid);
             if (player == null || !player.isOnline()) {
-                cancel(playerUuid, (String) null);
+                cancelWarmup(playerUuid, null);
                 continue;
             }
             long remainingNanos = active.durationNanos() - (now - active.startedAtNanos());
@@ -384,13 +394,8 @@ public final class TeleportService {
                 || (settings.ownersBypassCooldown() && shop.ownerUuid().equals(player.getUniqueId()));
     }
 
-    private void cancel(UUID playerUuid, String messageKey) {
+    private void cancelWarmup(UUID playerUuid, String messageKey) {
         boolean cancelled = clearPending(playerUuid) != null;
-        InFlightTeleport attempt = inFlight.cancel(playerUuid);
-        if (attempt != null) {
-            economy.refund(attempt.player(), attempt.chargedAmount());
-            cancelled = true;
-        }
         if (!cancelled || messageKey == null) {
             return;
         }
