@@ -2,7 +2,11 @@
 
 ## Teleport transaction lifecycle
 
-One player owns at most one accepted shop teleport at a time. Warmup is mutually exclusive with another warmup or an in-flight teleport. When warmup completes, the same main-thread turn acquires an identity-bound in-flight reservation before any Vault charge. The asynchronous completion callback may mutate state only while its exact attempt object remains authoritative. Failure/cancel/logout/shutdown compensation removes ownership once and refunds a charged amount at most once. Successful completion publishes one visit, installs one cooldown, then releases ownership. Stale callbacks are ignored. No blocking wait is introduced around Paper `teleportAsync`.
+One player owns at most one accepted shop teleport at a time. Warmup is mutually exclusive with another warmup or an in-flight teleport. When warmup completes, the same main-thread turn acquires an identity-bound in-flight reservation before any Vault charge.
+
+A warmup can be cancelled by movement, damage, logout, or shutdown before `teleportAsync` starts. Once Paper's asynchronous teleport has started, its exact attempt remains authoritative until terminal completion. Logout does not revoke that attempt or refund its fee: failed/exceptional completion owns refund settlement, while successful completion publishes one visit, installs one cooldown, and then releases ownership. Stale callbacks from superseded attempts are ignored. No blocking wait is introduced around Paper `teleportAsync`.
+
+Shutdown remains a separate fail-safe boundary because the plugin can no longer rely on a future main-thread callback after disable; outstanding attempts are drained and compensated during shutdown.
 
 ## Schema 3 compatibility
 
@@ -14,4 +18,4 @@ Async player-discovery loads capture player, global invalidation, and shop-direc
 
 ## Runtime boundary
 
-These changes are automated source-safety evidence only. PlexonCraft runtime certification, Spark/MSPT comparison, and the soak test remain mandatory before stable `v3.0.0`.
+Automated source/release closure and live PlexonCraft certification are separate gates. Stable `v3.0.0` requires exact-source CI, tests, distribution verification, accepted Phase 3/RC2 ancestry, immutable stable publication, and downloaded-asset verification. PlexonCraft migration, Vault/Theosis behavior, Spark/MSPT comparison, and soak testing remain a deployment follow-up and may be recorded as `runtime_certification=NOT_EXECUTED` in stable release provenance.
